@@ -7,14 +7,14 @@ ledger files and the MCP tool list.
 """
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import datetime as _dt
-import json
 import pathlib
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
+
+from node_sdk.sse import SSEHub, serve_sse
 
 if TYPE_CHECKING:
     from ..agent import AgentRuntime
@@ -33,7 +33,7 @@ class AgentInspectorState:
     model: str
     last_result: dict | None = None
     runtime: "AgentRuntime | None" = None
-    subscribers: set[asyncio.Queue] = dataclasses.field(default_factory=set)
+    hub: SSEHub = dataclasses.field(default_factory=SSEHub)
     history: list[dict] = dataclasses.field(default_factory=list)
     history_max: int = 500
 
@@ -46,11 +46,9 @@ class AgentInspectorState:
         self.history.append(evt)
         if len(self.history) > self.history_max:
             self.history = self.history[-self.history_max:]
-        for q in list(self.subscribers):
-            try:
-                q.put_nowait(evt)
-            except asyncio.QueueFull:
-                pass
+        # The data field on the wire is the full event dict — the legacy
+        # frontend reads `evt.kind` and `evt.at` from inside `data`.
+        self.hub.broadcast(kind, evt, event_id=evt["at"])
 
 
 def make_inspector_app(state: AgentInspectorState, rt: "AgentRuntime") -> web.Application:
@@ -121,37 +119,9 @@ def make_inspector_app(state: AgentInspectorState, rt: "AgentRuntime") -> web.Ap
         return web.json_response({"tools": out})
 
     async def events(request: web.Request) -> web.StreamResponse:
-        response = web.StreamResponse(status=200, headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-        })
-        await response.prepare(request)
-        queue: asyncio.Queue = asyncio.Queue(maxsize=512)
-        state.subscribers.add(queue)
-        try:
-            # replay recent history so a refreshed page isn't empty
-            for evt in state.history[-100:]:
-                await response.write(
-                    f"event: {evt['kind']}\ndata: {json.dumps(evt, default=str)}\n\n".encode()
-                )
-            while True:
-                try:
-                    evt = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    try:
-                        await response.write(b": heartbeat\n\n")
-                    except (ConnectionResetError, BrokenPipeError):
-                        break
-                    continue
-                try:
-                    await response.write(
-                        f"event: {evt['kind']}\ndata: {json.dumps(evt, default=str)}\n\n".encode()
-                    )
-                except (ConnectionResetError, BrokenPipeError):
-                    break
-        finally:
-            state.subscribers.discard(queue)
-        return response
+        def replay():
+            return [(evt["kind"], evt, evt["at"]) for evt in state.history[-100:]]
+        return await serve_sse(request, state.hub, replay=replay, queue_maxsize=512)
 
     app.router.add_get("/", index)
     app.router.add_get("/status", status)

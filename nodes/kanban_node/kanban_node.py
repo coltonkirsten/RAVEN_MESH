@@ -35,6 +35,7 @@ from typing import Any
 from aiohttp import web
 
 from node_sdk import MeshDeny, MeshNode
+from node_sdk.sse import SSEHub, serve_sse
 
 log = logging.getLogger("kanban_node")
 HERE = pathlib.Path(__file__).resolve().parent
@@ -61,7 +62,7 @@ class KanbanBoard:
         self.cards: list[dict] = []
         self._lock = asyncio.Lock()
         self._ui_hidden = False
-        self.subscribers: set[asyncio.Queue] = set()
+        self.hub = SSEHub()
         self._load()
 
     # persistence -------------------------------------------------------
@@ -94,11 +95,7 @@ class KanbanBoard:
     async def _persist_and_push(self) -> None:
         self._save_sync()
         snap = self.snapshot()
-        for q in list(self.subscribers):
-            try:
-                q.put_nowait(snap)
-            except asyncio.QueueFull:
-                pass
+        self.hub.broadcast("state", snap, event_id=snap["updated_at"])
 
     # snapshots ---------------------------------------------------------
 
@@ -325,35 +322,11 @@ def make_web_app(board: KanbanBoard) -> web.Application:
 
     # SSE stays open even when hidden so browsers see the un-hide event.
     async def events(request: web.Request) -> web.StreamResponse:
-        response = web.StreamResponse(status=200, headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-        })
-        await response.prepare(request)
-        queue: asyncio.Queue = asyncio.Queue()
-        board.subscribers.add(queue)
-        try:
-            await response.write(
-                f"event: state\ndata: {json.dumps(board.snapshot())}\n\n".encode()
-            )
-            while True:
-                try:
-                    snap = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    try:
-                        await response.write(b": heartbeat\n\n")
-                    except (ConnectionResetError, BrokenPipeError):
-                        break
-                    continue
-                try:
-                    await response.write(
-                        f"event: state\ndata: {json.dumps(snap)}\n\n".encode()
-                    )
-                except (ConnectionResetError, BrokenPipeError):
-                    break
-        finally:
-            board.subscribers.discard(queue)
-        return response
+        # Snapshot fresh on each connect so a refreshed page sees current state.
+        def replay():
+            snap = board.snapshot()
+            return [("state", snap, snap["updated_at"])]
+        return await serve_sse(request, board.hub, replay=replay)
 
     # ---- local browser-driven REST mutators (gated by visibility) ----
 
