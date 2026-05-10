@@ -21,6 +21,12 @@ import datetime as _dt
 from aiohttp import web
 
 from node_sdk import MeshNode
+from nodes.ui_visibility import (
+    VisibilityState,
+    make_handler as make_visibility_handler,
+    make_visibility_middleware,
+    report_status,
+)
 
 log = logging.getLogger("webui_node")
 HTML_PATH = pathlib.Path(__file__).resolve().parent / "index.html"
@@ -62,8 +68,8 @@ class WebUI:
         return {"ok": True, "color": color}
 
 
-def make_web_app(ui: WebUI) -> web.Application:
-    app = web.Application()
+def make_web_app(ui: WebUI, visibility: VisibilityState) -> web.Application:
+    app = web.Application(middlewares=[make_visibility_middleware(visibility)])
 
     async def index(request: web.Request) -> web.Response:
         return web.Response(text=HTML_PATH.read_text(), content_type="text/html")
@@ -106,12 +112,15 @@ def make_web_app(ui: WebUI) -> web.Application:
 
 async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port: int) -> int:
     ui = WebUI()
+    visibility = VisibilityState(visible=True)
     node = MeshNode(node_id=node_id, secret=secret, core_url=core_url)
     node.on("show_message", ui.show_message)
     node.on("change_color", ui.change_color)
+    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id, core_url=core_url))
     await node.start()
+    await report_status(node_id, visibility.visible, core_url=core_url)
 
-    web_app = make_web_app(ui)
+    web_app = make_web_app(ui, visibility)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, web_host, web_port)

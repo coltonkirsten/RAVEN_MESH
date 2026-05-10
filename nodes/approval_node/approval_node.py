@@ -28,6 +28,12 @@ import sys
 from aiohttp import web
 
 from node_sdk import MeshDeny, MeshError, MeshNode
+from nodes.ui_visibility import (
+    VisibilityState,
+    make_handler as make_visibility_handler,
+    make_visibility_middleware,
+    report_status,
+)
 
 log = logging.getLogger("approval_node")
 HTML_PATH = pathlib.Path(__file__).resolve().parent / "index.html"
@@ -90,8 +96,8 @@ class ApprovalNode:
         return True
 
 
-def make_web_app(approval: ApprovalNode) -> web.Application:
-    app = web.Application()
+def make_web_app(approval: ApprovalNode, visibility: VisibilityState) -> web.Application:
+    app = web.Application(middlewares=[make_visibility_middleware(visibility)])
 
     async def index(request: web.Request) -> web.Response:
         return web.Response(text=HTML_PATH.read_text(), content_type="text/html")
@@ -147,10 +153,13 @@ async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port:
     node = MeshNode(node_id=node_id, secret=secret, core_url=core_url, invoke_timeout=300)
     await node.connect()
     approval = ApprovalNode(node)
+    visibility = VisibilityState(visible=True)
     node.on("inbox", approval.on_inbox)
+    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id, core_url=core_url))
     await node.serve()
+    await report_status(node_id, visibility.visible, core_url=core_url)
 
-    web_app = make_web_app(approval)
+    web_app = make_web_app(approval, visibility)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, web_host, web_port)

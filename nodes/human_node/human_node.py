@@ -22,6 +22,12 @@ import sys
 from aiohttp import web
 
 from node_sdk import MeshError, MeshNode
+from nodes.ui_visibility import (
+    VisibilityState,
+    make_handler as make_visibility_handler,
+    make_visibility_middleware,
+    report_status,
+)
 
 log = logging.getLogger("human_node")
 HTML_PATH = pathlib.Path(__file__).resolve().parent / "index.html"
@@ -66,8 +72,8 @@ class HumanNode:
         log.info("inbox <- %s: %s", msg["from"], json.dumps(msg["payload"])[:200])
 
 
-def make_web_app(human: HumanNode) -> web.Application:
-    app = web.Application()
+def make_web_app(human: HumanNode, visibility: VisibilityState) -> web.Application:
+    app = web.Application(middlewares=[make_visibility_middleware(visibility)])
 
     async def index(request: web.Request) -> web.Response:
         return web.Response(text=HTML_PATH.read_text(), content_type="text/html")
@@ -128,10 +134,13 @@ async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port:
     node = MeshNode(node_id=node_id, secret=secret, core_url=core_url)
     await node.connect()
     human = HumanNode(node)
+    visibility = VisibilityState(visible=True)
     node.on("inbox", human.on_inbox)
+    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id, core_url=core_url))
     await node.serve()
+    await report_status(node_id, visibility.visible, core_url=core_url)
 
-    web_app = make_web_app(human)
+    web_app = make_web_app(human, visibility)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, web_host, web_port)

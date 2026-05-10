@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ui_visibility",
+  "description": "Show or hide a node's web UI without stopping its mesh participation.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["show", "hide"]
+    }
+  },
+  "required": ["action"],
+  "additionalProperties": false
+}

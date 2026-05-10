@@ -28,6 +28,10 @@ nodes:
         type: inbox
         invocation_mode: request_response
         schema: ../schemas/approval_request.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/ui_visibility.json
 
   - id: cron_node
     kind: hybrid
@@ -64,6 +68,10 @@ nodes:
         type: tool
         invocation_mode: request_response
         schema: ../schemas/webui_change_color.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/ui_visibility.json
 
   - id: human_node
     kind: actor
@@ -76,6 +84,10 @@ nodes:
         type: inbox
         invocation_mode: fire_and_forget
         schema: ../schemas/generic_inbox.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/ui_visibility.json
 
   - id: kanban_node
     kind: capability
@@ -149,7 +161,14 @@ relationships:
   - { from: human_node, to: approval_node.inbox }
   - { from: human_node, to: human_node.inbox }
 
-  # kanban_node — approval gates writes, human + cron drive directly.
+  # ui_visibility cross-edges: approval_node and human_node both invoke
+  # ui_visibility on each other and on webui_node.
+  - { from: approval_node, to: webui_node.ui_visibility }
+  - { from: approval_node, to: human_node.ui_visibility }
+  - { from: human_node, to: webui_node.ui_visibility }
+  - { from: human_node, to: approval_node.ui_visibility }
+
+  # kanban_node — approval gates writes, human + cron + nexus drive directly.
   - { from: approval_node, to: kanban_node.create_card }
   - { from: approval_node, to: kanban_node.move_card }
   - { from: approval_node, to: kanban_node.update_card }
@@ -167,3 +186,14 @@ relationships:
   - { from: human_node, to: kanban_node.status_get }
 
   - { from: cron_node, to: kanban_node.create_card }
+
+  - { from: nexus_agent, to: kanban_node.create_card }
+  - { from: nexus_agent, to: kanban_node.move_card }
+  - { from: nexus_agent, to: kanban_node.update_card }
+  - { from: nexus_agent, to: kanban_node.delete_card }
+  - { from: nexus_agent, to: kanban_node.list_cards }
+  - { from: nexus_agent, to: kanban_node.get_board }
+  - { from: nexus_agent, to: kanban_node.add_column }
+  - { from: nexus_agent, to: kanban_node.delete_column }
+  - { from: nexus_agent, to: kanban_node.ui_visibility }
+  - { from: nexus_agent, to: kanban_node.status_get }
