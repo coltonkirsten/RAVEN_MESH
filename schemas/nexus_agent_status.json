@@ -1,0 +1,7 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "nexus_agent_status",
+  "description": "No-input status query for the Nexus Agent.",
+  "type": "object",
+  "additionalProperties": true
+}
