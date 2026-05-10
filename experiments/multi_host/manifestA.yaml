@@ -1,0 +1,47 @@
+# Federated mesh — Core A.
+# Hosts node `alpha` (an actor). Knows about peer Core B and the `beta`
+# capability that lives there.
+
+local_core_name: A
+
+nodes:
+  - id: alpha
+    kind: actor
+    runtime: local-process
+    identity_secret: env:ALPHA_SECRET
+    metadata:
+      location_hint: host_A
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../../schemas/echo.json
+
+peer_cores:
+  - name: B
+    url: http://127.0.0.1:8001
+    peer_secret: env:PEER_AB_SECRET
+
+# Stub declaration for `beta`. Lives on Core B but Core A needs to know its
+# surfaces (to schema-validate before forwarding) and that any invocation
+# from a local node should be routed to peer B.
+remote_nodes:
+  - id: beta
+    peer: B
+    kind: capability
+    surfaces:
+      - name: ping
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/echo.json
+      - name: slow
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/echo.json
+
+relationships:
+  # Local node alpha is allowed to call beta.ping on the remote Core.
+  - from: alpha
+    to: beta.ping
+  - from: alpha
+    to: beta.slow

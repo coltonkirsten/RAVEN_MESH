@@ -1,0 +1,114 @@
+# V-03: replay protection for HMAC envelopes (register + invoke + respond).
+# Adds (a) timestamp freshness window, (b) per-node id-replay LRU, (c) a
+# fresh `nonce` requirement for register.
+# Files: core/core.py, node_sdk/__init__.py
+#
+# DO NOT APPLY — proposal for review.
+
+--- a/core/core.py
++++ b/core/core.py
+@@ -36,12 +36,28 @@ from jsonschema import ValidationError, validate as jsonschema_validate
+ from core.supervisor import Supervisor, make_script_resolver
+
+
+ ENVELOPE_TAIL_MAX = 200
++REPLAY_LRU_PER_NODE = 1024
++CLOCK_SKEW_SECONDS = 60
++REGISTER_NONCE_TTL = 3600
+
+
++def _ts_fresh(env: dict) -> bool:
++    ts = env.get("timestamp")
++    if not isinstance(ts, str):
++        return False
++    try:
++        t = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
++    except ValueError:
++        return False
++    now = _dt.datetime.now(_dt.timezone.utc)
++    if t.tzinfo is None:
++        t = t.replace(tzinfo=_dt.timezone.utc)
++    return abs((now - t).total_seconds()) <= CLOCK_SKEW_SECONDS
++
++
+ # ---------- helpers ----------
+ ...
+@@ -77,12 +93,18 @@ class CoreState:
+         self.audit_path = pathlib.Path(audit_path).resolve()
+         self.nodes_decl: dict[str, dict] = {}
+         self.connections: dict[str, dict] = {}
+         self.sessions: dict[str, str] = {}
+         self.edges: set[tuple[str, str]] = set()
+         self.pending: dict[str, dict] = {}
+         self.audit_lock = asyncio.Lock()
+         self._streams: set[asyncio.Queue] = set()
++        # Per-node replay-id LRU for invocations + responses.
++        self._seen_ids: dict[str, collections.OrderedDict] = {}
++        # Per-node nonce LRU for register.
++        self._register_nonces: dict[str, dict[str, float]] = {}
++
++    def remember_id(self, node_id: str, msg_id: str) -> bool:
++        """Returns True if the id is fresh; False if it's a replay."""
++        lru = self._seen_ids.setdefault(node_id, collections.OrderedDict())
++        if msg_id in lru:
++            return False
++        lru[msg_id] = True
++        while len(lru) > REPLAY_LRU_PER_NODE:
++            lru.popitem(last=False)
++        return True
++
++    def remember_register_nonce(self, node_id: str, nonce: str) -> bool:
++        nset = self._register_nonces.setdefault(node_id, {})
++        now = _dt.datetime.now(_dt.timezone.utc).timestamp()
++        # Sweep old.
++        for k, t in list(nset.items()):
++            if now - t > REGISTER_NONCE_TTL:
++                nset.pop(k, None)
++        if nonce in nset:
++            return False
++        nset[nonce] = now
++        return True
+
+@@ -192,9 +214,17 @@ async def handle_register(request: web.Request) -> web.Response:
+     state: CoreState = request.app["state"]
+     body = await request.json()
+     node_id = body.get("node_id")
+     decl = state.nodes_decl.get(node_id) if node_id else None
+     if not decl:
+         return web.json_response({"error": "unknown_node", "node_id": node_id}, status=404)
+     if not verify(body, decl["secret"]):
+         return web.json_response({"error": "bad_signature"}, status=401)
++    if not _ts_fresh(body):
++        return web.json_response({"error": "stale_or_missing_timestamp"}, status=401)
++    nonce = body.get("nonce")
++    if not isinstance(nonce, str) or len(nonce) < 16:
++        return web.json_response({"error": "missing_nonce"}, status=401)
++    if not state.remember_register_nonce(node_id, nonce):
++        return web.json_response({"error": "replay_detected"}, status=409)
+     ...
+
+@@ -252,6 +282,11 @@ async def _route_invocation(state: CoreState, env: dict,
+     if not decl:
+         ...
+     sig_valid = signature_pre_verified or verify(env, decl["secret"])
++    if not signature_pre_verified:
++        if not _ts_fresh(env):
++            return 401, {"error": "stale_or_missing_timestamp"}
++        if not state.remember_id(from_node, env.get("id", "")):
++            return 409, {"error": "replay_detected"}
+     ...
+
+--- a/node_sdk/__init__.py
++++ b/node_sdk/__init__.py
+@@ -190,12 +190,13 @@ class MeshNode:
+         return env
+
+     async def _register(self) -> None:
+         body: dict[str, Any] = {
+             "node_id": self.node_id,
+             "timestamp": now_iso(),
++            "nonce": uuid.uuid4().hex + uuid.uuid4().hex,  # 64 hex chars
+         }
+         body["signature"] = sign(body, self.secret)
+         assert self._http is not None
+         async with self._http.post(f"{self.core_url}/v0/register", json=body) as r:

@@ -1,0 +1,72 @@
+# V-06: bound per-node delivery queues; convert queue saturation into
+# a visible 503 + audit entry; evict the slow node on repeat saturation.
+# File: core/core.py
+#
+# Default cap is 1024 envelopes per node. Tunable via MESH_NODE_QUEUE_MAX.
+# Three consecutive QueueFulls trip an _close that forces re-register.
+#
+# DO NOT APPLY — proposal for review.
+
+--- a/core/core.py
++++ b/core/core.py
+@@ -36,6 +36,9 @@ from jsonschema import ValidationError, validate as jsonschema_validate
+ from core.supervisor import Supervisor, make_script_resolver
+
+
++NODE_QUEUE_MAX = int(os.environ.get("MESH_NODE_QUEUE_MAX", "1024"))
++NODE_QUEUE_STRIKES = 3
++
+ ENVELOPE_TAIL_MAX = 200
+
+@@ -200,12 +203,14 @@ async def handle_register(request: web.Request) -> web.Response:
+     state: CoreState = request.app["state"]
+     ...
+-    queue: asyncio.Queue = asyncio.Queue()
++    queue: asyncio.Queue = asyncio.Queue(maxsize=NODE_QUEUE_MAX)
+     session_id = uuid.uuid4().hex
+     state.connections[node_id] = {
+         "queue": queue,
+         "session_id": session_id,
+         "registered_at": now_iso(),
++        "strikes": 0,
+     }
+@@ -270,12 +275,38 @@ async def _route_invocation(state: CoreState, env: dict,
+     conn = state.connections.get(to_node)
+     if conn is None:
+         return 503, {"error": "node_offline", "to": to_node}
+-    await conn["queue"].put({"type": "deliver", "data": env})
++    delivered = _try_deliver(state, to_node, conn, env)
++    if not delivered:
++        return 503, {"error": "queue_full", "to": to_node}
+     ...
+
+
++def _try_deliver(state: CoreState, to_node: str, conn: dict, env: dict) -> bool:
++    """Best-effort enqueue. Returns False on saturation; bumps strike
++    counter and forces a re-register after NODE_QUEUE_STRIKES."""
++    q: asyncio.Queue = conn["queue"]
++    try:
++        q.put_nowait({"type": "deliver", "data": env})
++    except asyncio.QueueFull:
++        conn["strikes"] = conn.get("strikes", 0) + 1
++        # Audit is async, but we're in a sync helper — schedule it.
++        asyncio.create_task(state.audit({
++            "event": "denied_queue_full",
++            "to": to_node,
++            "id": env.get("id"),
++            "strikes": conn["strikes"],
++        }))
++        if conn["strikes"] >= NODE_QUEUE_STRIKES:
++            try:
++                # _close is consumed by the streaming loop and ends the SSE.
++                q.put_nowait({"type": "_close", "data": {"reason": "queue_full_eviction"}})
++            except asyncio.QueueFull:
++                pass  # already saturated; consumer is gone for sure
++            state.connections.pop(to_node, None)
++        return False
++    conn["strikes"] = 0
++    return True
++
++
+ async def handle_invoke(request: web.Request) -> web.Response:
+     ...

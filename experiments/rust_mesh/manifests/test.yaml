@@ -1,0 +1,24 @@
+nodes:
+  - id: alice
+    kind: actor
+    runtime: local-process
+    identity_secret: alice-secret
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: echo.json
+
+  - id: bob
+    kind: capability
+    runtime: local-process
+    identity_secret: bob-secret
+    surfaces:
+      - name: ping
+        type: tool
+        invocation_mode: request_response
+        schema: echo.json
+
+relationships:
+  - from: alice
+    to: bob.ping

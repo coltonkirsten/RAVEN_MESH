@@ -1,0 +1,7 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "echo",
+  "description": "Permissive schema used by echo/dummy capability surfaces.",
+  "type": "object",
+  "additionalProperties": true
+}

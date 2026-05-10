@@ -1,0 +1,217 @@
+# RAVEN_MESH — example EXTENDED manifest (capability-graph proposal)
+#
+# This file is illustrative. It does NOT load against today's Core: it shows
+# the four extensions proposed in MODEL.md §5 layered on top of the existing
+# manifest schema. All new fields are additive; existing manifests remain
+# valid under the same schema with these fields treated as unknown-and-allowed
+# (the manifest JSON Schema already declares additionalProperties: true on
+# every object).
+#
+# Read MODEL.md §5 alongside this file. The four extensions demonstrated:
+#
+#   §5.1 Delegation     -> `delegable: true` + `delegation: {...}` on an edge
+#   §5.2 Caveats        -> `caveats: { payload: <jsonschema fragment> }`
+#   §5.3 Time bounds    -> `expires_at:` (absolute) or `valid_for_seconds:` (lease)
+#   §5.4 Introspection  -> auto-synthesised `_capabilities` surface (commented)
+
+nodes:
+  - id: nexus_agent
+    kind: actor
+    runtime: local-process
+    identity_secret: env:NEXUS_AGENT_SECRET
+    metadata:
+      location_hint: mac-mini
+      description: |
+        Claude-Code-driven agent. May mint sub-caps for ephemeral
+        worker sub-agents via delegation envelopes.
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../../schemas/generic_inbox.json
+      - name: status
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/nexus_agent_status.json
+      # NOTE (§5.4): in the extended model, Core auto-injects a `_capabilities`
+      # surface on every node. Operators do not write it. Shown commented to
+      # make the proposal visible:
+      #
+      # - name: _capabilities
+      #   type: tool
+      #   invocation_mode: request_response
+      #   schema: ../../schemas/system_capabilities.json   # bundled with Core
+
+  - id: kanban_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:KANBAN_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: create_card
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/kanban_create_card.json
+      - name: delete_card
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/kanban_delete_card.json
+      - name: list_cards
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/kanban_list_cards.json
+      - name: get_board
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/kanban_get_board.json
+
+  - id: cron_node
+    kind: hybrid
+    runtime: local-process
+    identity_secret: env:CRON_NODE_SECRET
+    surfaces:
+      - name: set
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/cron_set.json
+
+  - id: webui_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:WEBUI_NODE_SECRET
+    surfaces:
+      - name: show_message
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/webui_show_message.json
+
+  - id: human_node
+    kind: actor
+    runtime: local-process
+    identity_secret: env:HUMAN_NODE_SECRET
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../../schemas/generic_inbox.json
+
+relationships:
+  # ---------------------------------------------------------------------------
+  # Plain edges (today's semantics, unchanged).
+  # ---------------------------------------------------------------------------
+
+  - from: human_node
+    to: kanban_node.get_board
+
+  - from: human_node
+    to: kanban_node.list_cards
+
+  # ---------------------------------------------------------------------------
+  # §5.2 — CAVEATS (typed payload restrictions).
+  #
+  # nexus_agent may create kanban cards, but only on board "work" and only
+  # at priority "low" or "med". The caveat is a JSON-Schema fragment that is
+  # merged with the surface's own schema at validation time. Note this
+  # closes weakness 5 from MODEL.md §4 — granularity narrower than per-surface.
+  # ---------------------------------------------------------------------------
+
+  - from: nexus_agent
+    to: kanban_node.create_card
+    caveats:
+      payload:
+        properties:
+          board_id: { const: "work" }
+          priority: { enum: ["low", "med"] }
+        required: ["board_id", "priority"]
+
+  # ---------------------------------------------------------------------------
+  # §5.3 — TIME BOUNDS.
+  #
+  # `expires_at`: absolute UTC ISO-8601. After this instant, Core rejects with
+  # decision=denied_expired. Useful for hand-issued temporary access.
+  # ---------------------------------------------------------------------------
+
+  - from: human_node
+    to: kanban_node.delete_card
+    expires_at: "2026-12-31T23:59:59Z"
+
+  # `valid_for_seconds`: rolling lease. The edge counts as valid only for N
+  # seconds after manifest load (or after a re-issue). Useful for cron-fired
+  # actions that should self-disarm if the operator forgets.
+  - from: cron_node
+    to: webui_node.show_message
+    valid_for_seconds: 86400      # one day; cron operator must re-issue
+
+  # ---------------------------------------------------------------------------
+  # §5.1 — DELEGATION.
+  #
+  # `delegable: true` says the holder of this edge MAY mint sub-capabilities
+  # for other principals. `delegation.max_depth` bounds how many further hops
+  # of attenuation are allowed (1 = the holder may mint once; the recipient
+  # cannot re-mint). `delegation.bind_to: pubkey` says the minted cap MUST
+  # name a recipient pubkey (or v0 HMAC fingerprint).
+  #
+  # Caveats appended at delegation time MUST narrow, never widen — the
+  # macaroons attenuation rule, enforced by HMAC chain replay.
+  # ---------------------------------------------------------------------------
+
+  - from: nexus_agent
+    to: kanban_node.list_cards
+    delegable: true
+    delegation:
+      max_depth: 2
+      bind_to: pubkey
+
+  # ---------------------------------------------------------------------------
+  # Combined example: caveats + time bound + delegation in one edge.
+  #
+  # nexus_agent may invoke cron_node.set, but only:
+  #   - to schedule cards under board_id "work"
+  #   - until end-of-quarter
+  #   - with the right to mint a sub-cap for one additional level (e.g. for a
+  #     spawned sub-agent that should inherit, but never widen, this access)
+  # ---------------------------------------------------------------------------
+
+  - from: nexus_agent
+    to: cron_node.set
+    expires_at: "2026-06-30T23:59:59Z"
+    caveats:
+      payload:
+        properties:
+          target_surface: { const: "kanban_node.create_card" }
+          payload:
+            properties:
+              board_id: { const: "work" }
+            required: ["board_id"]
+    delegable: true
+    delegation:
+      max_depth: 1
+      bind_to: pubkey
+
+  # ---------------------------------------------------------------------------
+  # §5.4 — Introspection edges are IMPLICIT.
+  #
+  # Under the extended model, every node receives a synthetic edge of the form
+  # (X, Y._capabilities) for all (X, Y) — that is, every node may inspect any
+  # other node's capability list. Operators do not write these. They are
+  # generated by Core at manifest-load and exposed via each node's
+  # auto-injected `_capabilities` surface.
+  #
+  # The response shape (illustrative; real schema lives in
+  # schemas/system_capabilities.json):
+  #
+  #   {
+  #     "outgoing": [
+  #       {"to": "kanban_node.create_card", "caveats": [...], "expires_at": null},
+  #       ...
+  #     ],
+  #     "incoming": [
+  #       {"from": "human_node"}, ...
+  #     ]
+  #   }
+  #
+  # This is the equivalent of A2A's /.well-known/agent-card.json scoped to
+  # capability rather than metadata, and it satisfies the symmetry weakness
+  # (§4 weakness 4) that today's mesh has — peers can finally ask "what may
+  # I invoke?" through the mesh itself, not via a backchannel to Core.

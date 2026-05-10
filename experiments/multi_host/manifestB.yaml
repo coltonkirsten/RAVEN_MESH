@@ -1,0 +1,44 @@
+# Federated mesh — Core B.
+# Hosts node `beta` (a capability). Knows about peer Core A and the `alpha`
+# actor that lives there. The (alpha, beta.ping) relationship MUST be
+# present here too — Core B enforces edges authoritatively for its surfaces.
+
+local_core_name: B
+
+nodes:
+  - id: beta
+    kind: capability
+    runtime: local-process
+    identity_secret: env:BETA_SECRET
+    metadata:
+      location_hint: host_B
+    surfaces:
+      - name: ping
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/echo.json
+      - name: slow
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/echo.json
+
+peer_cores:
+  - name: A
+    url: http://127.0.0.1:8000
+    peer_secret: env:PEER_AB_SECRET
+
+remote_nodes:
+  - id: alpha
+    peer: A
+    kind: actor
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../../schemas/echo.json
+
+relationships:
+  - from: alpha
+    to: beta.ping
+  - from: alpha
+    to: beta.slow

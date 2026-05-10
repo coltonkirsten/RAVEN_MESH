@@ -1,0 +1,87 @@
+# V-10: nexus_agent_isolated control server should not bind 0.0.0.0.
+# Two acceptable ends:
+#  (a) bind to the docker bridge IP only, leaving the LAN out, OR
+#  (b) switch to a unix-domain socket mounted into the container.
+#
+# This patch implements (a) by default and offers an env switch for (b).
+# Files: nodes/nexus_agent_isolated/agent.py,
+#        nodes/nexus_agent_isolated/docker_runner.py
+#
+# DO NOT APPLY — proposal for review.
+
+--- a/nodes/nexus_agent_isolated/agent.py
++++ b/nodes/nexus_agent_isolated/agent.py
+@@ -400,21 +400,46 @@ class IsolatedAgent:
+     async def _serve_control(self) -> None:
+         app = web.Application()
+         app.router.add_post("/control", self._handle_control)
+         runner = web.AppRunner(app)
+         await runner.setup()
+-        # Bound to 0.0.0.0 so the container can reach us via
+-        # host.docker.internal.
+-        site = web.TCPSite(runner, "0.0.0.0", self._control_port)
+-        await site.start()
++
++        sock_path = os.environ.get("NEXUS_AGENT_CONTROL_UDS")
++        if sock_path:
++            # Unix-domain socket option — no network surface at all.
++            # docker_runner.py mounts this path into the container.
++            sock_p = pathlib.Path(sock_path)
++            if sock_p.exists():
++                sock_p.unlink()
++            site = web.UnixSite(runner, sock_path)
++            await site.start()
++            os.chmod(sock_path, 0o600)
++            return
++
++        # Default: bind to the docker bridge IP only. The bridge IP is
++        # 'host.docker.internal' from the container's POV; from the
++        # host POV it resolves to a docker-managed address that is not
++        # routable on the LAN (typically 192.168.65.* on Docker Desktop
++        # or 172.17.0.1 on Linux). LAN neighbors cannot reach it.
++        bind_addr = os.environ.get("NEXUS_AGENT_CONTROL_BIND") or _docker_bridge_ip()
++        site = web.TCPSite(runner, bind_addr, self._control_port)
++        await site.start()
++        log.info("control server bound to %s:%d", bind_addr, self._control_port)
++
++
++def _docker_bridge_ip() -> str:
++    """Best-effort bridge address. On Docker Desktop, 192.168.65.254;
++    on Linux, 172.17.0.1. Override with NEXUS_AGENT_CONTROL_BIND."""
++    if sys.platform == "darwin":
++        return "192.168.65.254"
++    return "172.17.0.1"
+
+--- a/nodes/nexus_agent_isolated/docker_runner.py
++++ b/nodes/nexus_agent_isolated/docker_runner.py
+@@ -100,12 +100,28 @@ def run_claude_in_container(prompt: str, ...) -> ClaudeResult:
+     cmd = [
+         "docker", "run", "--rm",
+         "--name", container_name,
+         "--user", "1000:1000",
+         "--workdir", "/agent",
+-        "-e", f"NEXUS_AGENT_CONTROL_HOST=host.docker.internal",
+-        "-e", f"NEXUS_AGENT_CONTROL_PORT={control_port}",
+         "-e", f"NEXUS_AGENT_CONTROL_TOKEN={control_token}",
+         ...
+     ]
++
++    uds = os.environ.get("NEXUS_AGENT_CONTROL_UDS")
++    if uds:
++        # Mount the host UDS into the container and tell the agent to
++        # use it. No network port crosses any boundary.
++        cmd.extend([
++            "-v", f"{uds}:/run/nexus_agent_control.sock",
++            "-e", "NEXUS_AGENT_CONTROL_UDS=/run/nexus_agent_control.sock",
++        ])
++    else:
++        cmd.extend([
++            "-e", "NEXUS_AGENT_CONTROL_HOST=host.docker.internal",
++            "-e", f"NEXUS_AGENT_CONTROL_PORT={control_port}",
++            # Force docker to map host.docker.internal back to the
++            # bridge address so the container does not reach a
++            # publicly-bound 0.0.0.0 port on the host.
++            "--add-host", "host.docker.internal:host-gateway",
++        ])
++
+     ...

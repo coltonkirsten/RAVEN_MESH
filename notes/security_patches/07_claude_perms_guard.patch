@@ -1,0 +1,105 @@
+# V-07: centralize the dangerous claude flags so any future change is
+# visible in one place; gate --dangerously-skip-permissions behind
+# MESH_ALLOW_DANGEROUS=1; add a regression assertion on the flag set.
+# Files: nodes/nexus_agent/cli_runner.py,
+#        nodes/nexus_agent_isolated/docker_runner.py,
+#        nodes/nexus_agent/tests/test_cli_runner.py (new)
+#
+# DO NOT APPLY — proposal for review.
+
+--- a/nodes/nexus_agent/cli_runner.py
++++ b/nodes/nexus_agent/cli_runner.py
+@@ -10,6 +10,28 @@ import shlex
+ from pathlib import Path
+
+
++# These flags grant Claude unrestricted local capability. Any change
++# here is a security review trigger — tests assert on this exact tuple.
++CLAUDE_DANGEROUS_FLAGS: tuple[str, ...] = (
++    "--dangerously-skip-permissions",
++    "--strict-mcp-config",
++    "--tools", "",
++)
++
++
++def _danger_flags() -> tuple[str, ...]:
++    """Return the dangerous flag set if the operator opts in.
++    Default is the *interactive* path (no skip-permissions) so an
++    accidentally-launched runner cannot silently elevate."""
++    if os.environ.get("MESH_ALLOW_DANGEROUS") == "1":
++        return CLAUDE_DANGEROUS_FLAGS
++    return ("--strict-mcp-config", "--tools", "")
++
++
+ def _build_args(prompt: str, mcp_config_path: str) -> list[str]:
+     args = [
+         "claude",
+         "-p", prompt,
+         "--mcp-config", mcp_config_path,
+-        "--dangerously-skip-permissions",
+-        "--strict-mcp-config",
+-        "--tools", "",
+     ]
++    args.extend(_danger_flags())
+     return args
+@@ -110,9 +132,7 @@ def run_claude(prompt: str, mcp_config_path: str, ...) -> ClaudeResult:
+-    cmd = [
+-        "claude",
+-        "-p", prompt,
+-        "--mcp-config", mcp_config_path,
+-        "--dangerously-skip-permissions",
+-        "--strict-mcp-config",
+-        "--tools", "",
+-    ]
++    cmd = _build_args(prompt, mcp_config_path)
+     ...
+
+--- a/nodes/nexus_agent_isolated/docker_runner.py
++++ b/nodes/nexus_agent_isolated/docker_runner.py
+@@ -130,9 +130,11 @@ def _build_claude_argv(prompt: str, mcp_config_path: str, *, extra_run_args: lis
+     argv = [
+         "claude",
+         "-p", prompt,
+         "--mcp-config", mcp_config_path,
+-        "--dangerously-skip-permissions",
+-        "--strict-mcp-config",
+-        "--tools", "",
+     ]
++    # Imported from sibling module so the flag set lives in one place.
++    from nexus_agent.cli_runner import _danger_flags  # type: ignore
++    argv.extend(_danger_flags())
++    if extra_run_args:
++        # Refuse to splice caller-supplied flags through the dangerous set.
++        argv.extend(extra_run_args)
+     return argv
+
+--- /dev/null
++++ b/nodes/nexus_agent/tests/test_cli_runner.py
+@@ -0,0 +1,28 @@
++"""Regression guard: the dangerous claude flag set is part of the
++security boundary. Any silent change here demands a security review."""
++
++import os
++import pytest
++
++from nexus_agent.cli_runner import (
++    CLAUDE_DANGEROUS_FLAGS,
++    _danger_flags,
++    _build_args,
++)
++
++
++def test_dangerous_flags_pinned():
++    assert CLAUDE_DANGEROUS_FLAGS == (
++        "--dangerously-skip-permissions",
++        "--strict-mcp-config",
++        "--tools", "",
++    )
++
++
++def test_default_path_does_not_skip_permissions(monkeypatch):
++    monkeypatch.delenv("MESH_ALLOW_DANGEROUS", raising=False)
++    flags = _danger_flags()
++    assert "--dangerously-skip-permissions" not in flags
++    monkeypatch.setenv("MESH_ALLOW_DANGEROUS", "1")
++    assert "--dangerously-skip-permissions" in _danger_flags()

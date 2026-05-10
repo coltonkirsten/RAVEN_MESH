@@ -1,0 +1,99 @@
+# V-04: tag admin-synthesized envelopes; gate dangerous spoofs.
+# Files: core/core.py
+#
+# - Stamp every envelope synthesized by /v0/admin/invoke with
+#   meta.admin_synthesized so audit + tap streams show the operator
+#   override, instead of mimicking a node-originated invoke.
+# - Optional: require ADMIN_INVOKE_TOKEN (separate from ADMIN_TOKEN)
+#   so a read-only dashboard credential cannot impersonate any node.
+# - Refuse `from_node=approval_node` unless ?force_approval=1 — the
+#   approval flow is the most dangerous accidental spoof.
+#
+# DO NOT APPLY — proposal for review.
+
+--- a/core/core.py
++++ b/core/core.py
+@@ -64,6 +64,12 @@ def admin_token() -> str:
+     return os.environ.get("ADMIN_TOKEN", DEFAULT_ADMIN_TOKEN)
+
+
++def admin_invoke_token() -> str | None:
++    """Optional second token guarding the impersonation endpoint.
++    If unset, /v0/admin/invoke falls back to the regular admin token."""
++    return os.environ.get("ADMIN_INVOKE_TOKEN") or None
++
++
+ def _admin_authed(request: web.Request) -> bool:
+     token = request.headers.get("X-Admin-Token") or request.query.get("admin_token")
+     return token == admin_token()
+
++
++def _admin_invoke_authed(request: web.Request) -> bool:
++    expected = admin_invoke_token()
++    if expected is None:
++        return _admin_authed(request)
++    token = request.headers.get("X-Admin-Token")
++    return token == expected
++
++
+ # ---------- state ----------
+@@ -651,6 +672,16 @@ async def handle_admin_invoke(request: web.Request) -> web.Response:
+-    if not _admin_authed(request):
++    if not _admin_invoke_authed(request):
+         return web.json_response({"error": "unauthorized"}, status=401)
+     state: CoreState = request.app["state"]
+     body = await request.json()
+     from_node = body.get("from_node")
+     to_node = body.get("to_node")
+     surface = body.get("surface")
+     payload = body.get("payload", {})
++
++    # Approval is the human-in-the-loop guarantee. Refuse spoofing it
++    # unless the operator explicitly opts in for this single request.
++    if from_node == "approval_node" and request.query.get("force_approval") != "1":
++        return web.json_response(
++            {"error": "approval_spoof_requires_force_approval"},
++            status=403,
++        )
++
+     if not from_node or not to_node or not surface:
+         return web.json_response({"error": "missing_fields"}, status=400)
+     decl = state.nodes_decl.get(from_node)
+     if not decl:
+         return web.json_response({"error": "unknown_from_node"}, status=400)
++
++    admin_user = ""
++    tok = request.headers.get("X-Admin-Token") or ""
++    if tok:
++        admin_user = tok[:8]  # token prefix for traceability without leaking
++
+     env = {
+         "id": str(uuid.uuid4()),
+         "from": from_node,
+         "to": to_node,
+         "surface": surface,
+         "payload": payload,
+         "timestamp": now_iso(),
++        "meta": {
++            "admin_synthesized": True,
++            "admin_user": admin_user,
++            "remote_addr": request.remote or "",
++        },
+     }
+     env["signature"] = sign(env, decl["secret"])
+     code, resp = await _route_invocation(
+         state, env, from_node, signature_pre_verified=True,
+     )
++    # Make the override visible in the audit trail. _route_invocation
++    # already writes a `routed` entry; supplement it with the override
++    # marker so analysts can grep for admin-synthesized traffic.
++    await state.audit({
++        "event": "admin_invoke",
++        "id": env["id"],
++        "from": from_node,
++        "to": to_node,
++        "surface": surface,
++        "admin_user": admin_user,
++        "remote_addr": request.remote or "",
++    })
+     return web.json_response(resp, status=code)
