@@ -33,6 +33,7 @@ import yaml
 from aiohttp import web
 from jsonschema import ValidationError, validate as jsonschema_validate
 
+from core.manifest_validator import validate_manifest
 from core.supervisor import Supervisor, make_script_resolver
 
 
@@ -46,6 +47,41 @@ ADMIN_RATE_BUCKET_MAX = 4096
 
 def now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _run_manifest_validator(
+    parsed: Any, manifest_dir: pathlib.Path | str, *, source: str
+) -> None:
+    """Run the manifest validator and print findings to stdout.
+
+    Warnings-mode: prints, never blocks. Summary line is always emitted so
+    operators can see total counts at a glance. Format is `greppable`:
+    ``[manifest_validator] LEVEL: <message> (source=<site>)``.
+    """
+    try:
+        errors, warnings = validate_manifest(parsed, manifest_dir)
+    except Exception as e:  # validator promises not to raise; defensive belt
+        print(
+            f"[manifest_validator] ERROR: validator crashed: {e!r} "
+            f"(source={source})",
+            flush=True,
+        )
+        return
+    for w in warnings:
+        print(
+            f"[manifest_validator] WARNING: {w} (source={source})",
+            flush=True,
+        )
+    for e in errors:
+        print(
+            f"[manifest_validator] ERROR: {e} (source={source})",
+            flush=True,
+        )
+    print(
+        f"[manifest_validator] {len(warnings)} warnings, {len(errors)} errors "
+        f"(warnings-mode: not blocking) (source={source})",
+        flush=True,
+    )
 
 
 def canonical(obj: dict) -> str:
@@ -124,11 +160,13 @@ class CoreState:
 
     # manifest -----------------------------------------------------------
 
-    def load_manifest(self) -> None:
+    def load_manifest(self, *, source: str = "startup", validate: bool = True) -> None:
         self._reset_manifest_state()
         text = self.manifest_path.read_text()
         m = yaml.safe_load(text)
         manifest_dir = self.manifest_path.parent
+        if validate:
+            _run_manifest_validator(m, manifest_dir, source=source)
         for node in m.get("nodes", []):
             secret = self._resolve_secret(node["id"], node.get("identity_secret", ""))
             surfaces: dict[str, dict] = {}
@@ -563,16 +601,23 @@ async def handle_admin_manifest(request: web.Request) -> web.Response:
         return web.json_response({"error": "bad_yaml", "details": str(e)}, status=400)
     if not isinstance(parsed, dict) or "nodes" not in parsed:
         return web.json_response({"error": "manifest_missing_nodes"}, status=400)
+    # Validate the incoming yaml BEFORE writing it to disk. Warnings-mode:
+    # findings are printed but do not block the request.
+    _run_manifest_validator(
+        parsed, state.manifest_path.parent, source="/v0/admin/manifest"
+    )
     backup = state.manifest_path.with_suffix(state.manifest_path.suffix + ".bak")
     if state.manifest_path.exists():
         backup.write_text(state.manifest_path.read_text())
     state.manifest_path.write_text(raw)
     try:
-        state.load_manifest()
+        # Skip the load-time re-validation — we just validated the same dict
+        # pre-write. Avoids duplicating the summary line on every POST.
+        state.load_manifest(source="/v0/admin/manifest", validate=False)
     except Exception as e:
         if backup.exists():
             state.manifest_path.write_text(backup.read_text())
-            state.load_manifest()
+            state.load_manifest(source="/v0/admin/manifest:rollback", validate=False)
         return web.json_response({"error": "load_failed", "details": str(e)}, status=400)
     return web.json_response({
         "ok": True,
@@ -587,7 +632,7 @@ async def handle_admin_reload(request: web.Request) -> web.Response:
         return web.json_response({"error": "unauthorized"}, status=401)
     state: CoreState = request.app["state"]
     try:
-        state.load_manifest()
+        state.load_manifest(source="/v0/admin/reload")
     except Exception as e:
         return web.json_response({"error": "load_failed", "details": str(e)}, status=400)
     return web.json_response({
