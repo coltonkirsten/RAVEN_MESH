@@ -1,0 +1,10 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "chronicle.reverify",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["correlation_id"],
+  "properties": {
+    "correlation_id": {"type": "string", "minLength": 1}
+  }
+}

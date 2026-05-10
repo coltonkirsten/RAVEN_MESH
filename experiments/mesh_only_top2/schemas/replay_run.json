@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "replay_run",
+  "description": "Re-fire every invocation envelope from a captured chain via /v0/admin/invoke. Optional 'mutate' rewrites payload fields per envelope before re-firing — the building block for A/B and what-if tests.",
+  "type": "object",
+  "properties": {
+    "correlation_id": {"type": "string", "minLength": 1},
+    "dry_run": {"type": "boolean", "default": false, "description": "if true, return what would be re-fired without invoking"},
+    "mutate": {
+      "type": "object",
+      "description": "optional payload mutations applied to each invocation before re-fire",
+      "properties": {
+        "to_surface": {"type": "string", "description": "only mutate envelopes targeting this surface"},
+        "set": {
+          "type": "object",
+          "description": "shallow merge into payload (top-level keys only)",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["correlation_id"],
+  "additionalProperties": false
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "replay_list",
+  "description": "List captured invocation chains. Optional filters narrow the result set; result groups by correlation_id, newest last.",
+  "type": "object",
+  "properties": {
+    "since": {"type": "string", "description": "ISO timestamp; only chains starting at/after this time"},
+    "to_surface": {"type": "string", "description": "filter to chains whose first envelope targets this surface"},
+    "from_node": {"type": "string", "description": "filter to chains initiated by this node"},
+    "limit": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

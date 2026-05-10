@@ -1,0 +1,10 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "counter_increment",
+  "description": "Increment the counter by 'by' (default 1).",
+  "type": "object",
+  "properties": {
+    "by": {"type": "integer"}
+  },
+  "additionalProperties": false
+}

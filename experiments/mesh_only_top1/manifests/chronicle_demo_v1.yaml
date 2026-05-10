@@ -1,0 +1,77 @@
+# mesh_only_top1 — chronicle demo (echo v1 schema, loose).
+# Three nodes: a client_actor, an echo_capability, and the mesh_chronicle.
+
+nodes:
+  - id: client_actor
+    kind: actor
+    runtime: local-process
+    identity_secret: env:CLIENT_ACTOR_SECRET
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/client_inbox.json
+
+  - id: echo_capability
+    kind: capability
+    runtime: local-process
+    identity_secret: env:ECHO_CAPABILITY_SECRET
+    surfaces:
+      - name: ping
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/echo_v1.json
+
+  - id: mesh_chronicle
+    kind: capability
+    runtime: local-process
+    identity_secret: env:MESH_CHRONICLE_SECRET
+    metadata:
+      role: time_travel_debugger
+    surfaces:
+      - name: list_chains
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/chronicle_list_chains.json
+      - name: get_chain
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/chronicle_get_chain.json
+      - name: replay
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/chronicle_replay.json
+      - name: replay_chain
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/chronicle_replay_chain.json
+      - name: replay_diff
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/chronicle_replay_diff.json
+      - name: schema_compat
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/chronicle_schema_compat.json
+      - name: reverify
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/chronicle_reverify.json
+
+relationships:
+  - from: client_actor
+    to: echo_capability.ping
+  - from: client_actor
+    to: mesh_chronicle.list_chains
+  - from: client_actor
+    to: mesh_chronicle.get_chain
+  - from: client_actor
+    to: mesh_chronicle.replay
+  - from: client_actor
+    to: mesh_chronicle.replay_chain
+  - from: client_actor
+    to: mesh_chronicle.replay_diff
+  - from: client_actor
+    to: mesh_chronicle.schema_compat
+  - from: client_actor
+    to: mesh_chronicle.reverify

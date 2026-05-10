@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "echo v2 — stricter, requires user_id",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["text", "user_id"],
+  "properties": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "user_id": {"type": "string", "pattern": "^u_[A-Za-z0-9]+$"}
+  }
+}

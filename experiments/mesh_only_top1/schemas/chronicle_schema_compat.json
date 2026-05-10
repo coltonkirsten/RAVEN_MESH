@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "chronicle.schema_compat",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "correlation_ids": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "client_actor.inbox — fire-and-forget trigger",
+  "type": "object",
+  "additionalProperties": true
+}

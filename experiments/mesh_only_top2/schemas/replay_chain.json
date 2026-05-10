@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "replay_chain",
+  "description": "Fetch every envelope (invocation, response, error) sharing a correlation_id, ordered by capture time.",
+  "type": "object",
+  "properties": {
+    "correlation_id": {"type": "string", "minLength": 1}
+  },
+  "required": ["correlation_id"],
+  "additionalProperties": false
+}

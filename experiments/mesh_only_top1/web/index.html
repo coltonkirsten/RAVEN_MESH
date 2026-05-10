@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>mesh_chronicle — time-travel inspector</title>
+  <style>
+    body { font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           margin: 0; background: #0e1116; color: #d6dde7; }
+    header { padding: 14px 20px; background: #161b22; border-bottom: 1px solid #2d333b;
+             display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .04em; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
+            font-size: 11px; background: #1f6feb22; color: #79c0ff; }
+    main { display: grid; grid-template-columns: 380px 1fr; height: calc(100vh - 50px); }
+    aside { border-right: 1px solid #2d333b; overflow: auto; }
+    .chain { padding: 10px 14px; border-bottom: 1px solid #21262d; cursor: pointer; }
+    .chain:hover { background: #161b22; }
+    .chain.active { background: #1f6feb22; }
+    .chain .cid { font-family: ui-monospace, SFMono-Regular, monospace;
+                  font-size: 11px; color: #8b949e; }
+    .chain .head { font-weight: 600; margin-top: 2px; }
+    .chain .meta { color: #8b949e; font-size: 11px; margin-top: 3px; }
+    .ok { color: #56d364; }
+    .bad { color: #f85149; }
+    section { overflow: auto; padding: 16px 24px; }
+    button { font: inherit; background: #1f6feb; color: white; border: 0; border-radius: 6px;
+             padding: 6px 12px; cursor: pointer; margin-right: 6px; }
+    button.secondary { background: #21262d; color: #d6dde7; border: 1px solid #2d333b; }
+    pre { background: #0a0d11; padding: 10px 12px; border-radius: 6px; overflow: auto;
+          border: 1px solid #21262d; }
+    h2 { font-size: 13px; margin: 18px 0 8px; color: #8b949e; text-transform: uppercase;
+         letter-spacing: .05em; }
+    .toolbar { padding: 10px 14px; border-bottom: 1px solid #21262d; display: flex; gap: 6px; }
+    .event { background: #0a0d11; border: 1px solid #21262d; border-radius: 6px;
+             padding: 8px 10px; margin: 6px 0; font-family: ui-monospace, monospace;
+             font-size: 12px; }
+    .event .arrow { color: #79c0ff; }
+    .event.deny { border-color: #ad3a37; }
+    .event.resp { border-color: #2ea043; }
+    .diff-line { font-family: ui-monospace, monospace; font-size: 12px; padding: 2px 0; }
+    .diff-line.removed { color: #f85149; }
+    .diff-line.added { color: #56d364; }
+    .diff-line.changed { color: #d29922; }
+    label { display: block; font-size: 12px; color: #8b949e; margin-top: 8px; }
+    input { font: inherit; background: #0a0d11; color: inherit; border: 1px solid #21262d;
+            border-radius: 6px; padding: 5px 8px; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>mesh_chronicle <span style="color:#8b949e">— causal-chain time-travel</span></h1>
+    <span id="status" class="pill">loading</span>
+  </header>
+  <main>
+    <aside>
+      <div class="toolbar">
+        <input id="from-filter" placeholder="from_node" />
+        <input id="to-filter" placeholder="to_surface" />
+        <button class="secondary" onclick="refresh()">refresh</button>
+      </div>
+      <div id="chains"></div>
+    </aside>
+    <section id="detail">
+      <p style="color:#8b949e">Select a chain to inspect.</p>
+      <button onclick="runSchemaCompat()">Run schema-compat regression check</button>
+      <div id="schema-compat" style="margin-top:12px"></div>
+    </section>
+  </main>
+
+<script>
+let SELECTED = null;
+
+async function refresh() {
+  const f = document.getElementById("from-filter").value.trim();
+  const t = document.getElementById("to-filter").value.trim();
+  const u = new URL("/api/chains", location.origin);
+  if (f) u.searchParams.set("from_node", f);
+  if (t) u.searchParams.set("to_surface", t);
+  u.searchParams.set("limit", "100");
+  const r = await fetch(u);
+  const d = await r.json();
+  const status = document.getElementById("status");
+  status.textContent = d.connected
+    ? `${d.total_known} chains · admin tap connected`
+    : "admin tap disconnected";
+  status.style.background = d.connected ? "#2ea04333" : "#f8514922";
+  status.style.color = d.connected ? "#56d364" : "#f85149";
+  const list = document.getElementById("chains");
+  list.innerHTML = "";
+  for (const c of d.chains) {
+    const div = document.createElement("div");
+    div.className = "chain" + (c.correlation_id === SELECTED ? " active" : "");
+    div.onclick = () => selectChain(c.correlation_id);
+    div.innerHTML = `
+      <div class="cid">${c.correlation_id.slice(0, 8)}…</div>
+      <div class="head">${escape(c.root_from || "?")} <span class="arrow">→</span> ${escape(c.root_to || "?")}</div>
+      <div class="meta">${c.envelope_count} envelope(s) · <span class="${c.terminal_status === "ok" ? "ok" : "bad"}">${c.terminal_status}</span></div>
+    `;
+    list.appendChild(div);
+  }
+}
+
+async function selectChain(cid) {
+  SELECTED = cid;
+  const r = await fetch(`/api/chains/${encodeURIComponent(cid)}`);
+  const d = await r.json();
+  const detail = document.getElementById("detail");
+  detail.innerHTML = `
+    <h2>chain ${cid}</h2>
+    <div>
+      <button onclick="replay('${cid}')">Replay</button>
+      <button onclick="replayDiff('${cid}')">Replay + diff</button>
+      <button class="secondary" onclick="reverify('${cid}')">Re-verify HMAC</button>
+    </div>
+    <h2>envelopes</h2>
+    <div id="events"></div>
+    <h2>actions</h2>
+    <div id="action-out"></div>
+  `;
+  const ev = document.getElementById("events");
+  for (const e of d.events) {
+    const cls = e.kind === "response" ? "resp"
+              : (e.route_status && e.route_status !== "routed") ? "deny" : "";
+    const div = document.createElement("div");
+    div.className = "event " + cls;
+    div.innerHTML = `<b>${escape(e.kind || "?")}</b> ${escape(e.from_node || "")} <span class="arrow">→</span> ${escape(e.to_surface || "")}<br>` +
+      `<span style="color:#8b949e">status=${escape(e.route_status || "")}</span><br>` +
+      `<pre>${escape(JSON.stringify(e.payload, null, 2))}</pre>`;
+    ev.appendChild(div);
+  }
+  refresh();
+}
+
+async function replay(cid) {
+  const r = await fetch("/api/replay", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({correlation_id: cid}),
+  });
+  const d = await r.json();
+  document.getElementById("action-out").innerHTML =
+    `<h2>replay result</h2><pre>${escape(JSON.stringify(d, null, 2))}</pre>`;
+}
+
+async function replayDiff(cid) {
+  const r = await fetch("/api/replay_diff", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({correlation_id: cid}),
+  });
+  const d = await r.json();
+  let html = `<h2>replay vs original — ${d.diverged ? "<span class='bad'>diverged</span>" : "<span class='ok'>identical</span>"}</h2>`;
+  if (d.diffs && d.diffs.length) {
+    html += "<div>";
+    for (const x of d.diffs) {
+      const cls = x.kind === "added" ? "added" : x.kind === "removed" ? "removed" : "changed";
+      html += `<div class="diff-line ${cls}">${escape(x.path)} — ${escape(x.kind)}: ${escape(JSON.stringify(x.old_value))} → ${escape(JSON.stringify(x.new_value))}</div>`;
+    }
+    html += "</div>";
+  }
+  html += `<h2>raw</h2><pre>${escape(JSON.stringify(d, null, 2))}</pre>`;
+  document.getElementById("action-out").innerHTML = html;
+}
+
+async function reverify(cid) {
+  const r = await fetch("/api/replay", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({correlation_id: cid, _action: "reverify"}),
+  });
+  const d = await r.json();
+  document.getElementById("action-out").innerHTML =
+    `<h2>(reverify is mesh-surface only — see chronicle.reverify)</h2>` +
+    `<pre>${escape(JSON.stringify(d, null, 2))}</pre>`;
+}
+
+async function runSchemaCompat() {
+  const r = await fetch("/api/schema_compat", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({limit: 200}),
+  });
+  const d = await r.json();
+  const elt = document.getElementById("schema-compat");
+  let html = `<h2>schema-compat regression report</h2>` +
+    `<p>${d.total_invocations_checked} captured invocation(s) checked. ` +
+    `<b class="${d.now_breaking ? "bad" : "ok"}">${d.now_breaking}</b> would now fail under the current manifest.</p>`;
+  for (const ch of d.report) {
+    for (const c of ch.checks) {
+      const cls = c.compatible ? "ok" : "bad";
+      html += `<div class="diff-line ${c.compatible ? "added" : "removed"}">${escape(c.target)} ` +
+        `<span class="${cls}">${c.compatible ? "compatible" : "BREAKING — " + escape(c.reason || "")}</span>` +
+        (c.details ? `<br>&nbsp;&nbsp;<span style="color:#8b949e">${escape(c.details)}</span>` : "") +
+        `</div>`;
+    }
+  }
+  elt.innerHTML = html;
+}
+
+function escape(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+  })[c]);
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
