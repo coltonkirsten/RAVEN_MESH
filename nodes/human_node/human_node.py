@@ -19,6 +19,7 @@ import pathlib
 import signal
 import sys
 
+import aiohttp
 from aiohttp import web
 
 from node_sdk import MeshError, MeshNode
@@ -72,7 +73,8 @@ class HumanNode:
         log.info("inbox <- %s: %s", msg["from"], json.dumps(msg["payload"])[:200])
 
 
-def make_web_app(human: HumanNode, visibility: VisibilityState) -> web.Application:
+def make_web_app(human: HumanNode, visibility: VisibilityState,
+                 core_url: str, admin_token: str) -> web.Application:
     app = web.Application(middlewares=[make_visibility_middleware(visibility)])
 
     async def index(request: web.Request) -> web.Response:
@@ -80,6 +82,45 @@ def make_web_app(human: HumanNode, visibility: VisibilityState) -> web.Applicati
 
     async def state(request: web.Request) -> web.Response:
         return web.json_response(human.state())
+
+    async def schemas(request: web.Request) -> web.Response:
+        """Fetch schemas for all of this node's reachable target surfaces from Core admin API."""
+        result: dict = {}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{core_url}/v0/admin/state",
+                    headers={"X-Admin-Token": admin_token},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return web.json_response({"error": "admin_state_unavailable",
+                                                  "status": resp.status,
+                                                  "schemas": {}})
+                    full = await resp.json()
+        except Exception as e:
+            return web.json_response({"error": "admin_fetch_failed",
+                                      "details": str(e),
+                                      "schemas": {}})
+
+        # Build a {target_surface_string: schema_json} map for our reachable targets only.
+        nodes_by_id = {n["id"]: n for n in full.get("nodes", [])}
+        for target in human.allowed_targets:
+            if "." not in target:
+                continue
+            node_id, surface_name = target.split(".", 1)
+            n = nodes_by_id.get(node_id)
+            if not n:
+                continue
+            for s in n.get("surfaces", []):
+                if s["name"] == surface_name:
+                    result[target] = {
+                        "schema": s.get("schema", {}),
+                        "type": s.get("type"),
+                        "invocation_mode": s.get("invocation_mode"),
+                    }
+                    break
+        return web.json_response({"schemas": result})
 
     async def events(request: web.Request) -> web.StreamResponse:
         response = web.StreamResponse(status=200, headers={
@@ -125,12 +166,14 @@ def make_web_app(human: HumanNode, visibility: VisibilityState) -> web.Applicati
 
     app.router.add_get("/", index)
     app.router.add_get("/state", state)
+    app.router.add_get("/schemas", schemas)
     app.router.add_get("/events", events)
     app.router.add_post("/send", send)
     return app
 
 
-async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port: int) -> int:
+async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port: int,
+              admin_token: str) -> int:
     node = MeshNode(node_id=node_id, secret=secret, core_url=core_url)
     await node.connect()
     human = HumanNode(node)
@@ -140,7 +183,7 @@ async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port:
     await node.serve()
     await report_status(node_id, visibility.visible, core_url=core_url)
 
-    web_app = make_web_app(human, visibility)
+    web_app = make_web_app(human, visibility, core_url=core_url, admin_token=admin_token)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, web_host, web_port)
@@ -168,6 +211,7 @@ def main() -> int:
     p.add_argument("--core-url", default=os.environ.get("MESH_CORE_URL", "http://127.0.0.1:8000"))
     p.add_argument("--web-host", default=os.environ.get("HUMAN_HOST", "127.0.0.1"))
     p.add_argument("--web-port", type=int, default=int(os.environ.get("HUMAN_PORT", "8802")))
+    p.add_argument("--admin-token", default=os.environ.get("ADMIN_TOKEN", "admin-dev-token"))
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
     secret_env = args.secret_env or f"{args.node_id.upper()}_SECRET"
@@ -175,7 +219,8 @@ def main() -> int:
     if not secret:
         print(f"missing env var {secret_env}", file=sys.stderr)
         return 2
-    return asyncio.run(run(args.node_id, secret, args.core_url, args.web_host, args.web_port))
+    return asyncio.run(run(args.node_id, secret, args.core_url, args.web_host, args.web_port,
+                            args.admin_token))
 
 
 if __name__ == "__main__":

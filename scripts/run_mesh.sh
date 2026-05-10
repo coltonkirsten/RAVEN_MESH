@@ -86,7 +86,8 @@ for n in m.get('nodes', []):
 # Clean slate audit log
 rm -f audit.log
 
-# Start Core first
+# Start Core first (export MESH_MANIFEST so run_core.sh picks up the right manifest)
+export MESH_MANIFEST="$MANIFEST"
 start_one core "$HERE/run_core.sh"
 sleep 1
 
