@@ -18,6 +18,7 @@ export WEBUI_NODE_SECRET=${WEBUI_NODE_SECRET:-$(_derive webui_node)}
 export HUMAN_NODE_SECRET=${HUMAN_NODE_SECRET:-$(_derive human_node)}
 export KANBAN_NODE_SECRET=${KANBAN_NODE_SECRET:-$(_derive kanban_node)}
 export NEXUS_AGENT_SECRET=${NEXUS_AGENT_SECRET:-$(_derive nexus_agent)}
+export NEXUS_AGENT_ISOLATED_SECRET=${NEXUS_AGENT_ISOLATED_SECRET:-$(_derive nexus_agent_isolated)}
 
 export MESH_HOST=${MESH_HOST:-127.0.0.1}
 export MESH_PORT=${MESH_PORT:-8000}

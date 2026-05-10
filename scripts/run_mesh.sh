@@ -33,6 +33,7 @@ declare -a UI_NODES=(
   "approval_node|http://localhost:8803|approval queue"
   "nexus_agent|http://localhost:8804|nexus agent inspector"
   "kanban_node|http://localhost:8805|kanban board"
+  "nexus_agent_isolated|http://localhost:8806|nexus agent (isolated) inspector"
 )
 
 start_one() {

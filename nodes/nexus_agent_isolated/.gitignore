@@ -1,0 +1,4 @@
+data/logs/*
+data/sessions/*
+!data/logs/.gitkeep
+!data/sessions/.gitkeep
