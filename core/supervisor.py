@@ -71,20 +71,34 @@ log = logging.getLogger("supervisor")
 
 @dataclass
 class ChildSpec:
-    """Static description of how to start a child."""
+    """Static description of how to start a child.
+
+    PROTOCOL-LAYER: this struct is intentionally agnostic of *what* a child
+    does (kanban, voice, dashboard, anything). It only describes a process
+    lifecycle contract. Don't add node-shaped fields here.
+    """
     node_id: str
     cmd: list[str]
     env: dict[str, str]
     cwd: str
     log_path: str
-    # 'permanent' = always restart, 'transient' = restart only on abnormal exit,
-    # 'temporary' = never restart automatically.
+    # Restart policy:
+    #   permanent  — always restart on exit
+    #   transient  — restart only on abnormal (non-zero) exit
+    #   temporary  — never restart automatically
+    #   on_demand  — never spawned eagerly; spawned by ensure_running() on
+    #                first work, SIGTERMed after idle_shutdown_s of silence
     restart: str = "permanent"
     # Restart throttle: max N restarts in window seconds. Beyond that, the
     # supervisor gives up on the child and marks it 'failed'. Reset by a
     # successful long-lived run (uptime > window).
     max_restarts: int = 5
     restart_window_s: float = 60.0
+    # Idle window for restart="on_demand". After this many seconds with no
+    # ensure_running()/begin_work() activity, the supervisor SIGTERMs the
+    # child and waits for the next ensure_running() to spawn it again.
+    # Ignored for other restart strategies.
+    idle_shutdown_s: float = 30.0
 
 
 @dataclass
@@ -95,11 +109,22 @@ class ChildState:
     started_at: float = 0.0
     last_exit_code: Optional[int] = None
     last_exit_at: float = 0.0
-    restart_count: int = 0
+    restart_count: int = 0  # restarts in the current window (for throttling)
+    total_restart_count: int = 0  # cumulative across child's life (for /metrics)
     restart_window_start: float = 0.0
-    status: str = "stopped"  # stopped|starting|running|crashed|failed|stopping
+    # stopped|starting|running|crashed|failed|stopping|draining
+    status: str = "stopped"
     monitor_task: Optional[asyncio.Task] = None
     log_fd = None  # file handle, kept open for the child's life
+    # on_demand bookkeeping: when activity last occurred and the reaper task.
+    last_activity_at: float = 0.0
+    idle_reaper_task: Optional[asyncio.Task] = None
+    # Graceful-drain bookkeeping. `in_flight` is a generic counter the
+    # dispatcher (Core, or any future caller) increments around each unit
+    # of work. The supervisor knows nothing about envelopes — it only
+    # waits for the counter to hit zero.
+    in_flight: int = 0
+    drain_done: Optional[asyncio.Event] = None
 
     def to_dict(self) -> dict:
         uptime = (time.time() - self.started_at) if self.status == "running" else 0.0
@@ -112,6 +137,8 @@ class ChildState:
             "last_exit_code": self.last_exit_code,
             "last_exit_at": self.last_exit_at,
             "restart_count": self.restart_count,
+            "total_restart_count": self.total_restart_count,
+            "in_flight": self.in_flight,
             "log_path": self.spec.log_path,
             "restart_policy": self.spec.restart,
             "cmd": self.spec.cmd,
@@ -124,6 +151,21 @@ class ChildState:
 # start that node — e.g. dummy one-shots). Centralizing this keeps the
 # supervisor agnostic of the existing scripts/ layout.
 RunnerResolver = Callable[[str, dict], Optional[ChildSpec]]
+
+
+# PROTOCOL-LAYER: exponential backoff schedule for restart attempts.
+# Schedule: 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 30.0 (capped). Capping at 30s
+# bounds the worst-case wakeup time after a long crash storm while still
+# letting the supervisor stop hammering a flapping child.
+_BACKOFF_BASE_S = 0.5
+_BACKOFF_CAP_S = 30.0
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """attempt is 1-indexed. Returns exponential backoff capped at 30s."""
+    if attempt < 1:
+        return 0.0
+    return min(_BACKOFF_BASE_S * (2 ** (attempt - 1)), _BACKOFF_CAP_S)
 
 
 class Supervisor:
@@ -140,6 +182,7 @@ class Supervisor:
         self.lock = asyncio.Lock()
         self._stopping = False
         self._on_event = on_event
+        self.started_at = time.time()
 
     async def _emit(self, kind: str, **fields) -> None:
         if not self._on_event:
@@ -199,8 +242,13 @@ class Supervisor:
             return await self._start_locked(spec)
 
     async def reconcile(self, manifest_nodes: dict[str, dict]) -> dict:
-        """Diff manifest desired set vs. running set. Spawn missing, stop extras."""
-        actions = {"spawned": [], "stopped": [], "skipped": [], "kept": [], "errors": []}
+        """Diff manifest desired set vs. running set. Spawn missing, stop extras.
+
+        on_demand children are NOT spawned eagerly — they're listed under
+        `deferred` and wait for ensure_running() to wake them.
+        """
+        actions = {"spawned": [], "stopped": [], "skipped": [],
+                   "kept": [], "deferred": [], "errors": []}
         desired_ids = set(manifest_nodes.keys())
         async with self.lock:
             running_ids = {nid for nid, c in self.children.items()
@@ -216,6 +264,14 @@ class Supervisor:
                 spec = self.runner_resolver(nid, manifest_nodes[nid])
                 if spec is None:
                     actions["skipped"].append({"node_id": nid, "reason": "no_runner"})
+                    continue
+                # on_demand children are not spawned during reconcile; they
+                # come up the first time ensure_running() is called.
+                if spec.restart == "on_demand":
+                    actions["deferred"].append(nid)
+                    # Record the spec so list_processes() / metrics show it.
+                    if nid not in self.children:
+                        self.children[nid] = ChildState(spec=spec)
                     continue
                 try:
                     res = await self._start_locked(spec)
@@ -241,6 +297,186 @@ class Supervisor:
 
     def list_processes(self) -> list[dict]:
         return [c.to_dict() for c in self.children.values()]
+
+    # ---- on_demand: lazy spawn + idle reap (PROTOCOL-LAYER, generic) ----
+
+    async def ensure_running(self, node_id: str, manifest_node: dict) -> dict:
+        """Spawn the child if it's not already running.
+
+        Used by a dispatcher to wake an `on_demand` child on first work.
+        Idempotent for non-on_demand children that are already running.
+        Touches `last_activity_at` so the idle reaper sees fresh activity.
+        """
+        async with self.lock:
+            existing = self.children.get(node_id)
+            if existing and existing.status in ("running", "starting"):
+                existing.last_activity_at = time.time()
+                return {"ok": True, "already_running": True,
+                        "child": existing.to_dict()}
+            spec = self.runner_resolver(node_id, manifest_node)
+            if spec is None:
+                return {"ok": False, "error": "no_runner"}
+            res = await self._start_locked(spec)
+            child = self.children.get(node_id)
+            if child:
+                child.last_activity_at = time.time()
+                if (spec.restart == "on_demand"
+                        and (child.idle_reaper_task is None
+                             or child.idle_reaper_task.done())):
+                    child.idle_reaper_task = asyncio.create_task(
+                        self._idle_reaper(child)
+                    )
+            return res
+
+    async def _idle_reaper(self, child: ChildState) -> None:
+        """Poll the child's last_activity_at; SIGTERM after idle_shutdown_s.
+
+        Runs as a task per on_demand child. Cancelled when the child stops
+        for any other reason.
+        """
+        spec = child.spec
+        # Poll at a fraction of the idle window so we react reasonably fast.
+        poll_s = max(spec.idle_shutdown_s / 4.0, 0.1)
+        while True:
+            try:
+                await asyncio.sleep(poll_s)
+            except asyncio.CancelledError:
+                return
+            if child.status not in ("running", "starting"):
+                return
+            idle_for = time.time() - child.last_activity_at
+            if idle_for >= spec.idle_shutdown_s:
+                log.info("[supervisor] %s idle %.1fs, shutting down (on_demand)",
+                         spec.node_id, idle_for)
+                async with self.lock:
+                    if child.status in ("running", "starting"):
+                        await self._stop_locked(child, graceful=True, timeout=5.0)
+                await self._emit("on_demand_idle_shutdown",
+                                 node_id=spec.node_id, idle_for=round(idle_for, 1))
+                return
+
+    # ---- graceful drain + in-flight tracking (PROTOCOL-LAYER, generic) ----
+
+    def can_accept(self, node_id: str) -> bool:
+        """Generic predicate: should the dispatcher route new work to this child?
+
+        Returns False during drain/stop so the caller can refuse cleanly. The
+        supervisor doesn't know what 'work' means — that's the caller's job.
+        """
+        child = self.children.get(node_id)
+        if child is None:
+            return True
+        return child.status in ("running", "starting")
+
+    def begin_work(self, node_id: str) -> bool:
+        """Mark one unit of work in-flight. Returns False if not accepting."""
+        child = self.children.get(node_id)
+        if child is None:
+            return False
+        if child.status not in ("running", "starting"):
+            return False
+        child.in_flight += 1
+        child.last_activity_at = time.time()
+        return True
+
+    def end_work(self, node_id: str) -> None:
+        """Decrement in-flight. If draining and counter hits 0, signal done."""
+        child = self.children.get(node_id)
+        if child is None:
+            return
+        if child.in_flight > 0:
+            child.in_flight -= 1
+        child.last_activity_at = time.time()
+        if (child.status == "draining"
+                and child.in_flight == 0
+                and child.drain_done is not None):
+            child.drain_done.set()
+
+    async def drain(self, node_id: str, *, timeout: float = 30.0) -> dict:
+        """Stop accepting new work, wait for in-flight==0 or timeout, then SIGTERM.
+
+        Generic: the supervisor only flips the child's `status` to "draining"
+        and waits on a counter. Whether "work" means an envelope, an HTTP
+        request, or anything else is the caller's choice.
+        """
+        async with self.lock:
+            child = self.children.get(node_id)
+            if child is None:
+                return {"ok": False, "error": "unknown_node"}
+            if child.status not in ("running", "starting"):
+                return {"ok": False, "error": "not_running",
+                        "status": child.status}
+            child.status = "draining"
+            child.drain_done = asyncio.Event()
+            starting_in_flight = child.in_flight
+            if child.in_flight == 0:
+                child.drain_done.set()
+        await self._emit("drain_start", node_id=node_id,
+                         in_flight=starting_in_flight, timeout=timeout)
+        timed_out = False
+        try:
+            await asyncio.wait_for(child.drain_done.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            timed_out = True
+        async with self.lock:
+            # The drain might have raced with a stop or crash; only stop if
+            # we're still the one in 'draining' state.
+            if child.status == "draining":
+                await self._stop_locked(child, graceful=True, timeout=5.0)
+        await self._emit("drain_complete", node_id=node_id,
+                         timed_out=timed_out, drained=starting_in_flight)
+        return {
+            "ok": True,
+            "timed_out": timed_out,
+            "drained_in_flight": starting_in_flight,
+            "child": child.to_dict(),
+        }
+
+    # ---- metrics (PROTOCOL-LAYER, generic) ----
+
+    def metrics(self) -> dict:
+        """Generic per-child + aggregate metrics. Knows nothing about node kind."""
+        now = time.time()
+        children = []
+        total_restarts = 0
+        running = draining = failed = on_demand_warm = 0
+        for c in self.children.values():
+            uptime = (now - c.started_at) if c.status == "running" else 0.0
+            total_restarts += c.total_restart_count
+            if c.status == "running":
+                running += 1
+                if c.spec.restart == "on_demand":
+                    on_demand_warm += 1
+            elif c.status == "draining":
+                draining += 1
+            elif c.status == "failed":
+                failed += 1
+            children.append({
+                "node_id": c.spec.node_id,
+                "status": c.status,
+                "pid": c.pid,
+                "uptime_seconds": round(uptime, 1),
+                "started_at": c.started_at,
+                "last_exit_code": c.last_exit_code,
+                "last_exit_at": c.last_exit_at,
+                "restart_count_total": c.total_restart_count,
+                "restart_count_window": c.restart_count,
+                "restart_policy": c.spec.restart,
+                "in_flight": c.in_flight,
+            })
+        return {
+            "supervisor_started_at": self.started_at,
+            "supervisor_uptime_seconds": round(now - self.started_at, 1),
+            "totals": {
+                "children": len(self.children),
+                "running": running,
+                "draining": draining,
+                "failed": failed,
+                "on_demand_warm": on_demand_warm,
+                "restarts": total_restarts,
+            },
+            "children": children,
+        }
 
     async def shutdown_all(self, timeout: float = 5.0) -> None:
         self._stopping = True
@@ -296,6 +532,8 @@ class Supervisor:
         child.started_at = time.time()
         child.status = "running"
         child.log_fd = log_fd
+        child.in_flight = 0
+        child.drain_done = None
         child.monitor_task = asyncio.create_task(self._monitor(child))
 
         await self._emit("spawn", node_id=spec.node_id, pid=proc.pid)
@@ -311,6 +549,10 @@ class Supervisor:
         # Cancel monitor first so it doesn't try to restart on the deliberate exit.
         if child.monitor_task and not child.monitor_task.done():
             child.monitor_task.cancel()
+        # Cancel the idle reaper if this is an on_demand child.
+        if child.idle_reaper_task and not child.idle_reaper_task.done():
+            child.idle_reaper_task.cancel()
+            child.idle_reaper_task = None
         try:
             if graceful:
                 # SIGTERM to the whole process group (start_new_session=True
@@ -382,6 +624,18 @@ class Supervisor:
         # Decide whether to restart.
         spec = child.spec
         normal_exit = (rc == 0)
+        if spec.restart == "on_demand":
+            # An on_demand child exiting on its own is normal — that's the
+            # whole point. Don't auto-restart; wait for the next ensure_running().
+            # Cancel the idle reaper since the child is already gone.
+            if child.idle_reaper_task and not child.idle_reaper_task.done():
+                child.idle_reaper_task.cancel()
+                child.idle_reaper_task = None
+            child.status = "stopped"
+            child.proc = None
+            child.pid = None
+            await self._emit("on_demand_exit", node_id=spec.node_id, rc=rc)
+            return
         if spec.restart == "temporary":
             should_restart = False
         elif spec.restart == "transient":
@@ -400,6 +654,7 @@ class Supervisor:
             child.restart_window_start = now
             child.restart_count = 0
         child.restart_count += 1
+        child.total_restart_count += 1
         if child.restart_count > spec.max_restarts:
             child.status = "failed"
             log.error(
@@ -410,8 +665,8 @@ class Supervisor:
                              restart_count=child.restart_count)
             return
 
-        # Backoff: linear on restart_count, capped at 10s
-        backoff_s = min(0.5 * child.restart_count, 10.0)
+        # Exponential backoff capped at 30s: 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 30.0...
+        backoff_s = _backoff_seconds(child.restart_count)
         log.warning("[supervisor] %s exited rc=%d, restarting in %.1fs (attempt %d/%d)",
                     spec.node_id, rc, backoff_s, child.restart_count, spec.max_restarts)
         await self._emit("restart_scheduled", node_id=spec.node_id,
@@ -469,6 +724,7 @@ def make_script_resolver(repo_root: str, log_dir: str) -> RunnerResolver:
             restart=runner_meta.get("restart", "permanent"),
             max_restarts=int(runner_meta.get("max_restarts", 5)),
             restart_window_s=float(runner_meta.get("restart_window_s", 60.0)),
+            idle_shutdown_s=float(runner_meta.get("idle_shutdown_s", 30.0)),
         )
 
     return resolve

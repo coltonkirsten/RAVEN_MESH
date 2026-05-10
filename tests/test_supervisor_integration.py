@@ -242,6 +242,80 @@ async def test_unauthorized_request_rejected(supervisor_core):
             assert r.status == 401
 
 
+async def test_metrics_endpoint_returns_per_child_data(supervisor_core):
+    """GET /v0/admin/metrics exposes per-child + totals (PROTOCOL-LAYER, generic)."""
+    async with aiohttp.ClientSession() as s:
+        await _post(s, supervisor_core["url"] + "/v0/admin/spawn",
+                    json={"node_id": "alpha"})
+        await asyncio.sleep(0.3)
+
+        status, body = await _get(s, supervisor_core["url"] + "/v0/admin/metrics")
+        assert status == 200, body
+        assert body["supervisor_enabled"] is True
+        m = body["metrics"]
+        assert m["totals"]["children"] == 1
+        assert m["totals"]["running"] == 1
+        assert m["totals"]["restarts"] == 0
+        assert m["supervisor_uptime_seconds"] >= 0
+
+        nodes = {c["node_id"]: c for c in m["children"]}
+        assert "alpha" in nodes
+        assert nodes["alpha"]["status"] == "running"
+        assert nodes["alpha"]["uptime_seconds"] > 0
+        assert nodes["alpha"]["restart_count_total"] == 0
+
+
+async def test_metrics_endpoint_disabled_when_supervisor_off(tmp_path):
+    """With supervisor disabled, /metrics returns supervisor_enabled=False."""
+    audit_path = tmp_path / "audit.log"
+    manifest = ROOT / "manifests" / "demo.yaml"
+    app = make_app(str(manifest), str(audit_path), enable_supervisor=False)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"http://127.0.0.1:{port}/v0/admin/metrics",
+                             headers=HEADERS) as r:
+                assert r.status == 200
+                body = await r.json()
+                assert body["supervisor_enabled"] is False
+                assert body["metrics"] is None
+    finally:
+        await runner.cleanup()
+
+
+async def test_drain_endpoint_stops_running_child(supervisor_core):
+    """POST /v0/admin/drain stops a running child after in-flight reaches 0."""
+    async with aiohttp.ClientSession() as s:
+        await _post(s, supervisor_core["url"] + "/v0/admin/spawn",
+                    json={"node_id": "alpha"})
+        await asyncio.sleep(0.2)
+
+        status, body = await _post(s, supervisor_core["url"] + "/v0/admin/drain",
+                                    json={"node_id": "alpha", "timeout": 5.0})
+        assert status == 200, body
+        assert body["ok"] is True
+        assert body["timed_out"] is False
+        assert body["drained_in_flight"] == 0
+
+        await asyncio.sleep(0.1)
+        _, plist = await _get(s, supervisor_core["url"] + "/v0/admin/processes")
+        statuses = {p["node_id"]: p["status"] for p in plist["processes"]}
+        assert statuses["alpha"] == "stopped"
+
+
+async def test_drain_endpoint_unknown_node(supervisor_core):
+    async with aiohttp.ClientSession() as s:
+        status, body = await _post(s, supervisor_core["url"] + "/v0/admin/drain",
+                                    json={"node_id": "ghost", "timeout": 1.0})
+        assert status == 200
+        assert body["ok"] is False
+        assert body["error"] == "unknown_node"
+
+
 async def test_supervisor_disabled_returns_409(tmp_path):
     """Without enable_supervisor=True, supervisor endpoints return 409."""
     audit_path = tmp_path / "audit.log"

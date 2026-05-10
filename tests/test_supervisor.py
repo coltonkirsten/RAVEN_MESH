@@ -297,6 +297,345 @@ async def test_log_file_written(tmp_logs):
     assert "supervisor start" in content
 
 
+# ---------------------------------------------------------------------------
+# Wave-2 additions: on_demand, graceful drain, exponential backoff, metrics.
+# All four are PROTOCOL-LAYER (generic ChildSpec/ChildState mechanics) — no
+# node-specific knowledge belongs in the supervisor.
+# ---------------------------------------------------------------------------
+
+
+# ---- exponential backoff ----
+
+def test_backoff_schedule_is_exponential_capped_at_30():
+    from core.supervisor import _backoff_seconds, _BACKOFF_CAP_S
+    assert _backoff_seconds(1) == 0.5
+    assert _backoff_seconds(2) == 1.0
+    assert _backoff_seconds(3) == 2.0
+    assert _backoff_seconds(4) == 4.0
+    assert _backoff_seconds(5) == 8.0
+    assert _backoff_seconds(6) == 16.0
+    assert _backoff_seconds(7) == _BACKOFF_CAP_S  # 32 > 30 → capped
+    assert _backoff_seconds(20) == _BACKOFF_CAP_S
+    assert _BACKOFF_CAP_S == 30.0
+
+
+# ---- on_demand restart strategy ----
+
+@pytest.mark.asyncio
+async def test_on_demand_not_spawned_during_reconcile(tmp_logs):
+    """on_demand children are deferred, not spawned, by reconcile()."""
+    spec = _spec("lazy", tmp_logs, py="import time; time.sleep(60)",
+                 restart="on_demand")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+
+    res = await sup.reconcile({"lazy": {}})
+    assert "lazy" in res["actions"]["deferred"]
+    assert "lazy" not in res["actions"]["spawned"]
+    # Recorded but not running
+    child = sup.children.get("lazy")
+    assert child is not None
+    assert child.status == "stopped"
+    assert child.pid is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_running_wakes_on_demand_child(tmp_logs):
+    """ensure_running() spawns the child on first call; second call is a no-op."""
+    spec = _spec("waker", tmp_logs, py="import time; time.sleep(60)",
+                 restart="on_demand")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+
+    res1 = await sup.ensure_running("waker", {})
+    assert res1["ok"]
+    assert sup.children["waker"].status == "running"
+    pid1 = sup.children["waker"].pid
+    assert pid1 > 0
+
+    res2 = await sup.ensure_running("waker", {})
+    assert res2["ok"]
+    assert res2.get("already_running") is True
+    assert sup.children["waker"].pid == pid1
+
+    await sup.stop("waker")
+
+
+@pytest.mark.asyncio
+async def test_on_demand_idle_shutdown_then_respawn(tmp_logs):
+    """After idle_shutdown_s of silence, the child is reaped; ensure_running respawns."""
+    log_path = pathlib.Path(tmp_logs) / "idle.log"
+    spec = ChildSpec(
+        node_id="idle",
+        cmd=[sys.executable, "-c", "import time; time.sleep(60)"],
+        env={},
+        cwd=str(pathlib.Path.cwd()),
+        log_path=str(log_path),
+        restart="on_demand",
+        idle_shutdown_s=0.6,  # short for test
+    )
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+
+    await sup.ensure_running("idle", {})
+    pid1 = sup.children["idle"].pid
+    assert sup.children["idle"].status == "running"
+
+    # Wait past idle window (poll = idle/4 = 0.15s; trips at >=0.6s)
+    await asyncio.sleep(1.2)
+
+    assert sup.children["idle"].status == "stopped"
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid1, 0)
+
+    # ensure_running again wakes a fresh process
+    res = await sup.ensure_running("idle", {})
+    assert res["ok"]
+    pid2 = sup.children["idle"].pid
+    assert pid2 != pid1
+    assert sup.children["idle"].status == "running"
+
+    await sup.stop("idle")
+
+
+@pytest.mark.asyncio
+async def test_on_demand_natural_exit_does_not_restart(tmp_logs):
+    """on_demand child that exits on its own is NOT restarted."""
+    spec = _spec("oneshot_demand", tmp_logs, py="pass", restart="on_demand")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+
+    await sup.ensure_running("oneshot_demand", {})
+    await asyncio.sleep(0.6)
+
+    child = sup.children["oneshot_demand"]
+    assert child.status == "stopped"
+    assert child.pid is None
+    assert child.total_restart_count == 0
+
+
+@pytest.mark.asyncio
+async def test_begin_work_touches_activity_and_resets_idle(tmp_logs):
+    """begin_work() bumps last_activity_at so a busy child isn't reaped."""
+    log_path = pathlib.Path(tmp_logs) / "busy.log"
+    spec = ChildSpec(
+        node_id="busy",
+        cmd=[sys.executable, "-c", "import time; time.sleep(60)"],
+        env={},
+        cwd=str(pathlib.Path.cwd()),
+        log_path=str(log_path),
+        restart="on_demand",
+        idle_shutdown_s=0.6,
+    )
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+
+    await sup.ensure_running("busy", {})
+    pid = sup.children["busy"].pid
+    # Keep tickling the child every 200ms for a full second — should outlive
+    # the 600ms idle window because each begin_work resets the clock.
+    for _ in range(5):
+        await asyncio.sleep(0.2)
+        sup.begin_work("busy")
+        sup.end_work("busy")
+    assert sup.children["busy"].status == "running"
+    assert sup.children["busy"].pid == pid
+
+    await sup.stop("busy")
+
+
+# ---- graceful drain ----
+
+@pytest.mark.asyncio
+async def test_can_accept_reflects_child_state(tmp_logs):
+    spec = _spec("acceptor", tmp_logs, py="import time; time.sleep(60)")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+
+    # Unknown child: caller decides (returns True so caller isn't blocked
+    # on supervisor knowledge).
+    assert sup.can_accept("unknown") is True
+
+    await sup.spawn("acceptor", {})
+    assert sup.can_accept("acceptor") is True
+
+    await sup.stop("acceptor")
+    assert sup.can_accept("acceptor") is False
+
+
+@pytest.mark.asyncio
+async def test_drain_finishes_in_flight_then_stops(tmp_logs):
+    """drain() flips to draining, waits for in_flight==0, then SIGTERMs."""
+    spec = _spec("drainable", tmp_logs, py="import time; time.sleep(60)")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+    await sup.spawn("drainable", {})
+
+    # Pretend dispatcher started 2 envelopes
+    assert sup.begin_work("drainable") is True
+    assert sup.begin_work("drainable") is True
+    assert sup.children["drainable"].in_flight == 2
+
+    # Kick off drain in the background
+    drain_task = asyncio.create_task(sup.drain("drainable", timeout=5.0))
+    await asyncio.sleep(0.05)
+
+    # Now in draining: new work refused, can_accept False
+    assert sup.children["drainable"].status == "draining"
+    assert sup.can_accept("drainable") is False
+    assert sup.begin_work("drainable") is False
+
+    # Finish the in-flight work
+    sup.end_work("drainable")
+    await asyncio.sleep(0.05)
+    assert sup.children["drainable"].status == "draining"  # still 1 left
+    sup.end_work("drainable")
+
+    res = await drain_task
+    assert res["ok"] is True
+    assert res["timed_out"] is False
+    assert res["drained_in_flight"] == 2
+    assert sup.children["drainable"].status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_drain_with_no_in_flight_completes_immediately(tmp_logs):
+    spec = _spec("idle_drain", tmp_logs, py="import time; time.sleep(60)")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+    await sup.spawn("idle_drain", {})
+
+    res = await sup.drain("idle_drain", timeout=5.0)
+    assert res["ok"] is True
+    assert res["timed_out"] is False
+    assert res["drained_in_flight"] == 0
+    assert sup.children["idle_drain"].status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_drain_times_out_and_kills_anyway(tmp_logs):
+    """If in_flight never hits 0, drain still stops the child after timeout."""
+    spec = _spec("hangs", tmp_logs, py="import time; time.sleep(60)")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+    await sup.spawn("hangs", {})
+
+    # Pretend in-flight work that nobody finishes
+    sup.begin_work("hangs")
+
+    res = await sup.drain("hangs", timeout=0.3)
+    assert res["ok"] is True
+    assert res["timed_out"] is True
+    assert sup.children["hangs"].status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_drain_unknown_node_fails(tmp_logs):
+    sup = Supervisor(runner_resolver=lambda nid, m: None, log_dir=tmp_logs)
+    res = await sup.drain("ghost", timeout=1.0)
+    assert res["ok"] is False
+    assert res["error"] == "unknown_node"
+
+
+# ---- metrics ----
+
+@pytest.mark.asyncio
+async def test_metrics_includes_uptime_and_zero_restarts(tmp_logs):
+    spec = _spec("metrified", tmp_logs, py="import time; time.sleep(60)")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+    await sup.spawn("metrified", {})
+    await asyncio.sleep(0.2)
+
+    m = sup.metrics()
+    assert m["totals"]["children"] == 1
+    assert m["totals"]["running"] == 1
+    assert m["totals"]["restarts"] == 0
+    assert m["supervisor_uptime_seconds"] >= 0
+
+    children = m["children"]
+    assert len(children) == 1
+    c = children[0]
+    assert c["node_id"] == "metrified"
+    assert c["status"] == "running"
+    assert c["uptime_seconds"] > 0
+    assert c["restart_count_total"] == 0
+    assert c["in_flight"] == 0
+
+    await sup.stop("metrified")
+
+
+@pytest.mark.asyncio
+async def test_metrics_counts_restarts_across_crashes(tmp_logs):
+    """total_restart_count accumulates across crash-restart cycles."""
+    spec = _spec("crashy", tmp_logs, py="import sys; sys.exit(1)",
+                 restart="permanent", max_restarts=10, restart_window_s=30.0)
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+    await sup.spawn("crashy", {})
+
+    # Wait for at least 2 restart cycles. Exponential backoff: 0.5s, 1.0s.
+    await asyncio.sleep(2.0)
+    await sup.stop("crashy")
+
+    m = sup.metrics()
+    assert m["totals"]["restarts"] >= 2
+    c = next(c for c in m["children"] if c["node_id"] == "crashy")
+    assert c["restart_count_total"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_metrics_tracks_in_flight_during_drain(tmp_logs):
+    spec = _spec("inflight", tmp_logs, py="import time; time.sleep(60)")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+    await sup.spawn("inflight", {})
+    sup.begin_work("inflight")
+    sup.begin_work("inflight")
+
+    m = sup.metrics()
+    c = next(c for c in m["children"] if c["node_id"] == "inflight")
+    assert c["in_flight"] == 2
+
+    sup.end_work("inflight")
+    sup.end_work("inflight")
+    await sup.stop("inflight")
+
+
+@pytest.mark.asyncio
+async def test_metrics_classifies_on_demand_warm(tmp_logs):
+    """on_demand children running register as on_demand_warm in metrics."""
+    spec = _spec("warm", tmp_logs, py="import time; time.sleep(60)",
+                 restart="on_demand")
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs)
+
+    # Nothing warm yet
+    m = sup.metrics()
+    assert m["totals"]["on_demand_warm"] == 0
+
+    await sup.ensure_running("warm", {})
+    m = sup.metrics()
+    assert m["totals"]["on_demand_warm"] == 1
+    assert m["totals"]["running"] == 1
+
+    await sup.stop("warm")
+
+
+# ---- exponential backoff: end-to-end via crash schedule ----
+
+@pytest.mark.asyncio
+async def test_exponential_backoff_visible_in_emitted_events(tmp_logs):
+    """Emitted restart_scheduled events carry the new exponential backoff_s."""
+    events = []
+
+    async def collect(evt):
+        events.append(evt)
+
+    spec = _spec("backoffy", tmp_logs, py="import sys; sys.exit(1)",
+                 restart="permanent", max_restarts=10, restart_window_s=30.0)
+    sup = Supervisor(runner_resolver=lambda nid, m: spec, log_dir=tmp_logs,
+                     on_event=collect)
+
+    await sup.spawn("backoffy", {})
+    # Wait long enough to see a few restart_scheduled events (0.5 + 1.0 = 1.5s).
+    await asyncio.sleep(2.0)
+    await sup.stop("backoffy")
+
+    backoffs = [e["backoff_s"] for e in events if e["kind"] == "restart_scheduled"]
+    assert len(backoffs) >= 2
+    # First two attempts: 0.5, 1.0 (exponential, not 0.5 + 0.5*n linear)
+    assert backoffs[0] == 0.5
+    assert backoffs[1] == 1.0
+
+
 @pytest.mark.asyncio
 async def test_shutdown_all_kills_children(tmp_logs):
     spec_a = _spec("aa", tmp_logs, py="import time; time.sleep(60)")
