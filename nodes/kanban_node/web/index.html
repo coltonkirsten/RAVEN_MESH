@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>RAVEN Mesh — kanban_node</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #111114;
+    --border: #1f1f24;
+    --border-hover: #2c2c34;
+    --text: #e6e6e9;
+    --muted: #76767e;
+    --accent: #00d2ff;
+    --accent-dim: rgba(0, 210, 255, 0.18);
+    --danger: #ff4d6d;
+    --tag-bg: #1a1a20;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+    overflow: hidden;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.7rem 1.2rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 {
+    font-size: 0.95rem;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  header .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 8px var(--accent);
+  }
+  header .meta { color: var(--muted); font-size: 0.8rem; font-family: ui-monospace, monospace; }
+  header .spacer { flex: 1; }
+  header input[type="search"] {
+    background: #0e0e12;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.4rem 0.7rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    width: 240px;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  header input[type="search"]:focus { border-color: var(--accent); }
+  header button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.4rem 0.85rem;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  header button:hover { border-color: var(--accent); background: var(--accent-dim); }
+
+  main.board {
+    display: flex;
+    gap: 1rem;
+    padding: 1rem;
+    height: calc(100vh - 50px);
+    overflow-x: auto;
+    align-items: stretch;
+  }
+  .column {
+    flex: 0 0 290px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    max-height: 100%;
+    transition: border-color 0.15s;
+  }
+  .column.drag-over { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-dim); }
+  .col-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.7rem 0.85rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .col-name { font-weight: 600; font-size: 0.88rem; letter-spacing: 0.02em; }
+  .col-count {
+    color: var(--muted);
+    font-family: ui-monospace, monospace;
+    font-size: 0.72rem;
+    margin-left: 0.5rem;
+  }
+  .col-actions { display: flex; gap: 0.3rem; }
+  .col-actions button {
+    background: transparent; border: none; color: var(--muted);
+    cursor: pointer; padding: 0.15rem 0.4rem; border-radius: 4px;
+    font-size: 0.85rem; line-height: 1;
+  }
+  .col-actions button:hover { color: var(--accent); background: var(--accent-dim); }
+  .col-actions button.danger:hover { color: var(--danger); background: rgba(255, 77, 109, 0.12); }
+
+  .cards {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .card {
+    background: #0e0e12;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    cursor: grab;
+    transition: border-color 0.12s, transform 0.06s;
+  }
+  .card:hover { border-color: var(--border-hover); }
+  .card:active { cursor: grabbing; }
+  .card.dragging { opacity: 0.4; }
+  .card-title { font-weight: 500; line-height: 1.35; word-break: break-word; }
+  .card-id {
+    display: block;
+    font-family: ui-monospace, monospace;
+    font-size: 0.68rem;
+    color: var(--muted);
+    margin-top: 0.35rem;
+  }
+  .card-tags { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.4rem; }
+  .tag {
+    background: var(--tag-bg);
+    color: var(--accent);
+    font-family: ui-monospace, monospace;
+    font-size: 0.68rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+  }
+
+  .add-card-btn {
+    background: transparent;
+    border: 1px dashed var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 0.45rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+    margin: 0 0.6rem 0.6rem;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .add-card-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .add-column {
+    flex: 0 0 240px;
+    background: transparent;
+    border: 1px dashed var(--border);
+    color: var(--muted);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: border-color 0.15s, color 0.15s;
+    align-self: flex-start;
+    padding: 1rem;
+    height: 80px;
+  }
+  .add-column:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* modal */
+  .modal-bg {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(4px);
+    display: none;
+    align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .modal-bg.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.4rem;
+    width: 460px; max-width: 90vw;
+  }
+  .modal h2 { margin: 0 0 0.85rem; font-size: 1rem; font-weight: 600; }
+  .modal label {
+    display: block; color: var(--muted); font-size: 0.74rem;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    margin: 0.85rem 0 0.3rem;
+  }
+  .modal input, .modal textarea, .modal select {
+    width: 100%;
+    background: #0e0e12;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.55rem 0.7rem;
+    border-radius: 5px;
+    font-size: 0.88rem;
+    font-family: inherit;
+    outline: none;
+  }
+  .modal input:focus, .modal textarea:focus, .modal select:focus { border-color: var(--accent); }
+  .modal textarea { min-height: 80px; resize: vertical; }
+  .modal-actions {
+    display: flex; gap: 0.5rem; justify-content: flex-end;
+    margin-top: 1.2rem;
+  }
+  .modal-actions button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.5rem 0.95rem;
+    border-radius: 5px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .modal-actions button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    font-weight: 600;
+  }
+  .modal-actions button.primary:hover { filter: brightness(1.1); }
+  .modal-actions button.danger {
+    border-color: rgba(255,77,109,0.4);
+    color: var(--danger);
+  }
+  .modal-actions button.danger:hover { background: rgba(255,77,109,0.1); }
+  .modal-actions .spacer { flex: 1; }
+  .modal .meta {
+    color: var(--muted); font-family: ui-monospace, monospace; font-size: 0.7rem;
+  }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #1f1f24; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #2c2c34; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <h1>kanban_node</h1>
+  <span class="meta" id="meta">—</span>
+  <span class="spacer"></span>
+  <input type="search" id="search" placeholder="Search title or tag…" />
+  <button id="add-col-btn">+ Column</button>
+</header>
+<main class="board" id="board"></main>
+
+<div class="modal-bg" id="modal-bg">
+  <div class="modal" id="modal">
+    <h2 id="modal-title">New card</h2>
+    <input type="hidden" id="m-card-id" />
+    <label>Title</label>
+    <input id="m-title" />
+    <label>Description</label>
+    <textarea id="m-desc"></textarea>
+    <label>Tags <span class="meta">(comma-separated)</span></label>
+    <input id="m-tags" />
+    <label>Column</label>
+    <select id="m-column"></select>
+    <div class="meta" id="m-meta"></div>
+    <div class="modal-actions">
+      <button class="danger" id="m-delete" style="display:none">Delete</button>
+      <span class="spacer"></span>
+      <button id="m-cancel">Cancel</button>
+      <button class="primary" id="m-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const boardEl = document.getElementById("board");
+const metaEl = document.getElementById("meta");
+const searchEl = document.getElementById("search");
+const modalBg = document.getElementById("modal-bg");
+const mTitle = document.getElementById("m-title");
+const mDesc = document.getElementById("m-desc");
+const mTags = document.getElementById("m-tags");
+const mColumn = document.getElementById("m-column");
+const mCardId = document.getElementById("m-card-id");
+const mModalTitle = document.getElementById("modal-title");
+const mDelete = document.getElementById("m-delete");
+const mMeta = document.getElementById("m-meta");
+
+let state = { columns: [], cards: [] };
+let filter = "";
+
+function api(path, opts = {}) {
+  return fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  }).then(async (r) => {
+    if (!r.ok) throw await r.json().catch(() => ({ error: r.statusText }));
+    return r.json();
+  });
+}
+
+function render() {
+  metaEl.textContent = `${state.cards.length} cards · ${state.columns.length} columns`;
+  boardEl.innerHTML = "";
+
+  const sortedCols = [...state.columns].sort((a, b) => a.position - b.position);
+  for (const col of sortedCols) boardEl.appendChild(renderColumn(col));
+
+  const addColEl = document.createElement("button");
+  addColEl.className = "add-column";
+  addColEl.textContent = "+ Add column";
+  addColEl.onclick = () => {
+    const name = prompt("Column name:");
+    if (!name) return;
+    api("/api/columns", { method: "POST", body: JSON.stringify({ name }) })
+      .catch((e) => alert("Failed: " + (e.error || e)));
+  };
+  boardEl.appendChild(addColEl);
+}
+
+function renderColumn(col) {
+  const wrap = document.createElement("section");
+  wrap.className = "column";
+  wrap.dataset.column = col.name;
+
+  const head = document.createElement("div");
+  head.className = "col-head";
+  const cardsIn = state.cards.filter((c) => c.column === col.name);
+  head.innerHTML = `
+    <div>
+      <span class="col-name">${escapeHtml(col.name)}</span>
+      <span class="col-count">${cardsIn.length}</span>
+    </div>
+    <div class="col-actions">
+      <button class="danger" title="Delete column">×</button>
+    </div>
+  `;
+  head.querySelector("button.danger").onclick = () => deleteColumn(col.name);
+  wrap.appendChild(head);
+
+  const cardList = document.createElement("div");
+  cardList.className = "cards";
+  for (const c of cardsIn.filter(cardMatchesFilter)) {
+    cardList.appendChild(renderCard(c));
+  }
+  wrap.appendChild(cardList);
+
+  const addBtn = document.createElement("button");
+  addBtn.className = "add-card-btn";
+  addBtn.textContent = "+ Add card";
+  addBtn.onclick = () => openModal({ column: col.name });
+  wrap.appendChild(addBtn);
+
+  // drag-drop wiring
+  wrap.ondragover = (e) => {
+    e.preventDefault();
+    wrap.classList.add("drag-over");
+  };
+  wrap.ondragleave = () => wrap.classList.remove("drag-over");
+  wrap.ondrop = async (e) => {
+    e.preventDefault();
+    wrap.classList.remove("drag-over");
+    const cardId = e.dataTransfer.getData("text/plain");
+    if (!cardId) return;
+    const card = state.cards.find((c) => c.id === cardId);
+    if (!card || card.column === col.name) return;
+    try {
+      await api("/api/cards/" + cardId, {
+        method: "PATCH",
+        body: JSON.stringify({ to_column: col.name }),
+      });
+    } catch (err) { alert("Move failed: " + (err.error || err)); }
+  };
+
+  return wrap;
+}
+
+function renderCard(card) {
+  const el = document.createElement("article");
+  el.className = "card";
+  el.draggable = true;
+  el.ondragstart = (e) => {
+    el.classList.add("dragging");
+    e.dataTransfer.setData("text/plain", card.id);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  el.ondragend = () => el.classList.remove("dragging");
+  el.onclick = () => openModal(card);
+
+  const title = document.createElement("div");
+  title.className = "card-title";
+  title.textContent = card.title;
+  el.appendChild(title);
+
+  if (card.tags && card.tags.length) {
+    const tagWrap = document.createElement("div");
+    tagWrap.className = "card-tags";
+    for (const t of card.tags) {
+      const tagEl = document.createElement("span");
+      tagEl.className = "tag";
+      tagEl.textContent = t;
+      tagWrap.appendChild(tagEl);
+    }
+    el.appendChild(tagWrap);
+  }
+
+  const idEl = document.createElement("span");
+  idEl.className = "card-id";
+  idEl.textContent = card.id;
+  el.appendChild(idEl);
+
+  return el;
+}
+
+function cardMatchesFilter(card) {
+  if (!filter) return true;
+  const f = filter.toLowerCase();
+  if (card.title.toLowerCase().includes(f)) return true;
+  if (card.description && card.description.toLowerCase().includes(f)) return true;
+  if (card.tags && card.tags.some((t) => t.toLowerCase().includes(f))) return true;
+  return false;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function openModal(card) {
+  const isNew = !card.id;
+  mModalTitle.textContent = isNew ? "New card" : "Edit card";
+  mCardId.value = card.id || "";
+  mTitle.value = card.title || "";
+  mDesc.value = card.description || "";
+  mTags.value = (card.tags || []).join(", ");
+
+  mColumn.innerHTML = "";
+  for (const c of [...state.columns].sort((a, b) => a.position - b.position)) {
+    const opt = document.createElement("option");
+    opt.value = c.name; opt.textContent = c.name;
+    if (c.name === card.column) opt.selected = true;
+    mColumn.appendChild(opt);
+  }
+
+  mDelete.style.display = isNew ? "none" : "inline-block";
+  mMeta.textContent = isNew ? "" : `created ${card.created_at} · updated ${card.updated_at}`;
+  modalBg.classList.add("open");
+  setTimeout(() => mTitle.focus(), 30);
+}
+
+function closeModal() { modalBg.classList.remove("open"); }
+
+document.getElementById("m-cancel").onclick = closeModal;
+modalBg.onclick = (e) => { if (e.target === modalBg) closeModal(); };
+
+document.getElementById("m-save").onclick = async () => {
+  const title = mTitle.value.trim();
+  if (!title) { mTitle.focus(); return; }
+  const tags = mTags.value.split(",").map((s) => s.trim()).filter(Boolean);
+  const id = mCardId.value;
+  try {
+    if (id) {
+      const original = state.cards.find((c) => c.id === id);
+      const wantedCol = mColumn.value;
+      if (original && original.column !== wantedCol) {
+        await api("/api/cards/" + id, {
+          method: "PATCH",
+          body: JSON.stringify({ to_column: wantedCol }),
+        });
+      }
+      await api("/api/cards/" + id, {
+        method: "PATCH",
+        body: JSON.stringify({ title, description: mDesc.value, tags }),
+      });
+    } else {
+      await api("/api/cards", {
+        method: "POST",
+        body: JSON.stringify({
+          column: mColumn.value, title,
+          description: mDesc.value, tags,
+        }),
+      });
+    }
+    closeModal();
+  } catch (err) {
+    alert("Save failed: " + (err.error || err));
+  }
+};
+
+mDelete.onclick = async () => {
+  if (!confirm("Delete this card?")) return;
+  try {
+    await api("/api/cards/" + mCardId.value, { method: "DELETE" });
+    closeModal();
+  } catch (err) { alert("Delete failed: " + (err.error || err)); }
+};
+
+async function deleteColumn(name) {
+  if (!confirm(`Delete column "${name}"? (must be empty)`)) return;
+  try {
+    await api("/api/columns/" + encodeURIComponent(name), { method: "DELETE" });
+  } catch (err) { alert("Delete failed: " + (err.error || err)); }
+}
+
+document.getElementById("add-col-btn").onclick = () => {
+  const name = prompt("Column name:");
+  if (!name) return;
+  api("/api/columns", { method: "POST", body: JSON.stringify({ name }) })
+    .catch((e) => alert("Failed: " + (e.error || e)));
+};
+
+searchEl.oninput = () => { filter = searchEl.value; render(); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && modalBg.classList.contains("open")) closeModal();
+});
+
+// initial fetch + SSE
+fetch("/state").then((r) => r.json()).then((s) => { state = s; render(); }).catch(() => {});
+const es = new EventSource("/events");
+es.addEventListener("state", (e) => {
+  try { state = JSON.parse(e.data); render(); } catch (_) {}
+});
+es.onerror = () => { /* browser will auto-reconnect */ };
+</script>
+</body>
+</html>

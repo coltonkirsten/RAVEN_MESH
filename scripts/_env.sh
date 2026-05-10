@@ -16,6 +16,7 @@ export APPROVAL_NODE_SECRET=${APPROVAL_NODE_SECRET:-$(_derive approval_node)}
 export CRON_NODE_SECRET=${CRON_NODE_SECRET:-$(_derive cron_node)}
 export WEBUI_NODE_SECRET=${WEBUI_NODE_SECRET:-$(_derive webui_node)}
 export HUMAN_NODE_SECRET=${HUMAN_NODE_SECRET:-$(_derive human_node)}
+export KANBAN_NODE_SECRET=${KANBAN_NODE_SECRET:-$(_derive kanban_node)}
 
 export MESH_HOST=${MESH_HOST:-127.0.0.1}
 export MESH_PORT=${MESH_PORT:-8000}

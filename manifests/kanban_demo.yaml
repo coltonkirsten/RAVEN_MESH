@@ -1,0 +1,99 @@
+# RAVEN Mesh — kanban_demo manifest.
+# Wires the kanban_node together with a dummy actor and an approval/human gate
+# so it can be smoke-tested standalone without depending on the full mesh.
+
+nodes:
+  - id: kanban_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:KANBAN_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: create_card
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_create_card.json
+      - name: move_card
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_move_card.json
+      - name: update_card
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_update_card.json
+      - name: delete_card
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_delete_card.json
+      - name: list_cards
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_list_cards.json
+      - name: get_board
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_get_board.json
+      - name: add_column
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_add_column.json
+      - name: delete_column
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_delete_column.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_ui_visibility.json
+      - name: status_get
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/kanban_status_get.json
+
+  - id: dummy_actor
+    kind: actor
+    runtime: local-process
+    identity_secret: env:DUMMY_ACTOR_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/generic_inbox.json
+
+  - id: human_node
+    kind: actor
+    runtime: local-process
+    identity_secret: env:HUMAN_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/generic_inbox.json
+
+relationships:
+  - { from: dummy_actor, to: kanban_node.create_card }
+  - { from: dummy_actor, to: kanban_node.move_card }
+  - { from: dummy_actor, to: kanban_node.update_card }
+  - { from: dummy_actor, to: kanban_node.delete_card }
+  - { from: dummy_actor, to: kanban_node.list_cards }
+  - { from: dummy_actor, to: kanban_node.get_board }
+  - { from: dummy_actor, to: kanban_node.add_column }
+  - { from: dummy_actor, to: kanban_node.delete_column }
+  - { from: dummy_actor, to: kanban_node.ui_visibility }
+  - { from: dummy_actor, to: kanban_node.status_get }
+
+  - { from: human_node, to: kanban_node.create_card }
+  - { from: human_node, to: kanban_node.move_card }
+  - { from: human_node, to: kanban_node.update_card }
+  - { from: human_node, to: kanban_node.delete_card }
+  - { from: human_node, to: kanban_node.list_cards }
+  - { from: human_node, to: kanban_node.get_board }
+  - { from: human_node, to: kanban_node.add_column }
+  - { from: human_node, to: kanban_node.delete_column }
+  - { from: human_node, to: kanban_node.ui_visibility }
+  - { from: human_node, to: kanban_node.status_get }
