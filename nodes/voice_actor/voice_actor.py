@@ -44,6 +44,35 @@ from .realtime_client import RealtimeClient, decode_audio_delta
 
 log = logging.getLogger("voice_actor")
 HTML_PATH = pathlib.Path(__file__).resolve().parent / "index.html"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def _load_dotenv(path: pathlib.Path) -> None:
+    """Minimal .env loader. Only sets vars not already in the environment.
+
+    Supports KEY=VALUE per line, optional surrounding quotes, and # comments.
+    Anything fancier (export prefixes, multi-line, ${VAR} interpolation) is out
+    of scope — keeps the dep surface zero.
+    """
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        log.warning(".env at %s could not be read: %s", path, e)
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_load_dotenv(REPO_ROOT / ".env")
 
 DEFAULT_VOICE = "alloy"
 DEFAULT_MODEL = os.environ.get("VOICE_ACTOR_MODEL", "gpt-realtime-2")
