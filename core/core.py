@@ -21,6 +21,7 @@ import datetime as _dt
 import hashlib
 import hmac
 import json
+import logging
 import os
 import pathlib
 import signal
@@ -41,6 +42,45 @@ ENVELOPE_TAIL_MAX = 200
 NODE_QUEUE_MAX = 1024
 LEGACY_ADMIN_TOKEN = "admin-dev-token"
 ADMIN_RATE_BUCKET_MAX = 4096
+
+# Replay protection: per-protocol bounds on the timestamp window.
+REPLAY_WINDOW_MIN_S = 5
+REPLAY_WINDOW_MAX_S = 300
+REPLAY_WINDOW_DEFAULT_S = 60
+# Bound the nonce LRU. One entry ≈ a uuid4 string; 16k bounds memory at a few
+# hundred KB while comfortably exceeding any realistic message rate over a
+# 300s window.
+REPLAY_NONCE_LRU_MAX = 16384
+
+_log = logging.getLogger("mesh.core")
+
+
+def _load_replay_window_s() -> int:
+    # Replay window (seconds). Bounded [5, 300] in code. Default 60.
+    raw = os.environ.get("MESH_REPLAY_WINDOW_S")
+    if raw is None:
+        return REPLAY_WINDOW_DEFAULT_S
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        _log.warning(
+            "MESH_REPLAY_WINDOW_S=%r is not a valid int; falling back to default %ds",
+            raw, REPLAY_WINDOW_DEFAULT_S,
+        )
+        return REPLAY_WINDOW_DEFAULT_S
+    if val < REPLAY_WINDOW_MIN_S:
+        _log.warning(
+            "MESH_REPLAY_WINDOW_S=%d below floor; clamped to %ds",
+            val, REPLAY_WINDOW_MIN_S,
+        )
+        return REPLAY_WINDOW_MIN_S
+    if val > REPLAY_WINDOW_MAX_S:
+        _log.warning(
+            "MESH_REPLAY_WINDOW_S=%d above ceiling; clamped to %ds",
+            val, REPLAY_WINDOW_MAX_S,
+        )
+        return REPLAY_WINDOW_MAX_S
+    return val
 
 
 # ---------- helpers ----------
@@ -100,6 +140,26 @@ def verify(obj: dict, secret: str) -> bool:
     return hmac.compare_digest(sig, sign(obj, secret))
 
 
+def _parse_iso_ts(ts: Any) -> _dt.datetime | None:
+    if not isinstance(ts, str):
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed
+
+
+def _ts_within_window(env_ts: Any, window_s: int) -> bool:
+    parsed = _parse_iso_ts(env_ts)
+    if parsed is None:
+        return False
+    now = _dt.datetime.now(_dt.timezone.utc)
+    return abs((now - parsed).total_seconds()) <= window_s
+
+
 def admin_token() -> str:
     """Return the configured admin token, refusing unset/legacy defaults.
 
@@ -150,6 +210,11 @@ class CoreState:
         # Admin tap.
         self._admin_streams: set[asyncio.Queue] = set()
         self.envelope_tail: collections.deque = collections.deque(maxlen=ENVELOPE_TAIL_MAX)
+        # Single LRU of envelope ids that have already been routed. Shared
+        # across every replay-gated endpoint so the uniqueness invariant is
+        # protocol-wide, not per-route.
+        self._replay_nonces: collections.OrderedDict[str, None] = collections.OrderedDict()
+        self.replay_window_s: int = _load_replay_window_s()
         # Process supervisor (set by make_app after manifest loads).
         # Optional — Core works fine without it; falls back to scripts/run_mesh.sh
         # owning processes. When attached, /v0/admin/{spawn,stop,restart,reconcile}
@@ -213,6 +278,26 @@ class CoreState:
             if f == node_id or t.split(".", 1)[0] == node_id:
                 out.append({"from": f, "to": t})
         return out
+
+    # replay protection --------------------------------------------------
+
+    def check_replay(self, env: dict) -> tuple[bool, str | None]:
+        """Validate envelope freshness + nonce uniqueness.
+
+        Returns ``(ok, error_code)``. On the happy path the envelope's id is
+        recorded in the protocol-wide LRU so a second presentation is rejected.
+        """
+        if not _ts_within_window(env.get("timestamp"), self.replay_window_s):
+            return False, "stale_or_missing_timestamp"
+        msg_id = env.get("id")
+        if not isinstance(msg_id, str) or not msg_id:
+            return False, "missing_id"
+        if msg_id in self._replay_nonces:
+            return False, "replay_detected"
+        self._replay_nonces[msg_id] = None
+        while len(self._replay_nonces) > REPLAY_NONCE_LRU_MAX:
+            self._replay_nonces.popitem(last=False)
+        return True, None
 
     # audit + tap --------------------------------------------------------
 
@@ -322,6 +407,15 @@ async def _route_invocation(state: CoreState, env: dict,
         state.emit_envelope(env=env, direction="in", signature_valid=False,
                             route_status="denied_signature_invalid")
         return 401, {"error": "bad_signature"}
+    if not signature_pre_verified:
+        ok, err = state.check_replay(env)
+        if not ok:
+            await state.audit(type="invocation", from_node=from_node, to_surface=to,
+                              decision=f"denied_{err}", correlation_id=correlation_id, details={})
+            state.emit_envelope(env=env, direction="in", signature_valid=True,
+                                route_status=f"denied_{err}")
+            status = 409 if err == "replay_detected" else 401
+            return status, {"error": err}
     if not isinstance(to, str) or "." not in to:
         state.emit_envelope(env=env, direction="in", signature_valid=True,
                             route_status="bad_surface_id")
@@ -419,6 +513,9 @@ async def handle_respond(request: web.Request) -> web.Response:
         return web.json_response({"error": "bad_signature"}, status=401)
     if env.get("kind") not in ("response", "error"):
         return web.json_response({"error": "bad_kind", "expected": "response|error"}, status=400)
+    ok, err = state.check_replay(env)
+    if not ok:
+        return web.json_response({"error": err}, status=409 if err == "replay_detected" else 401)
     correlation_id = env.get("correlation_id")
     if not correlation_id:
         return web.json_response({"error": "missing_correlation_id"}, status=400)

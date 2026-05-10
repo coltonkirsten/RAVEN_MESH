@@ -15,7 +15,7 @@ import uuid
 import aiohttp
 import pytest
 
-from core.core import canonical, sign, verify
+from core.core import canonical, now_iso, sign, verify
 from node_sdk import MeshDeny, MeshError, MeshNode
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -265,7 +265,7 @@ async def test_step_10_external_language_node(core_server):
                                 "to": data.get("from", ""),
                                 "kind": "response",
                                 "payload": {"pong": data.get("payload", {})},
-                                "timestamp": "now",
+                                "timestamp": now_iso(),
                             }
                             resp["signature"] = sign(resp, ext_secret)
                             await s.post(f"{url}/v0/respond", json=resp)
