@@ -1,0 +1,22 @@
+# Bench manifest for the existing HTTP-based RAVEN Mesh core.
+# Mirrors manifest.yaml's dashboard <-> echo edge; loaded by core/core.py.
+nodes:
+  - id: echo
+    kind: capability
+    runtime: local-process
+    identity_secret: env:BENCH_ECHO_SECRET
+    surfaces:
+      - name: ping
+        type: tool
+        invocation_mode: request_response
+        schema: ../../schemas/echo.json
+
+  - id: dashboard
+    kind: actor
+    runtime: local-process
+    identity_secret: env:BENCH_DASHBOARD_SECRET
+    surfaces: []
+
+relationships:
+  - from: dashboard
+    to: echo.ping

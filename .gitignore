@@ -30,3 +30,5 @@ experiments/*/__pycache__/
 experiments/go_mesh/bin/
 experiments/elixir_mesh/mesh/_build/
 experiments/elixir_mesh/mesh/deps/
+experiments/nats_pivot/run_logs/
+nodes/kanban_node/data/
