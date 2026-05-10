@@ -25,7 +25,6 @@ from nodes.ui_visibility import (
     VisibilityState,
     make_handler as make_visibility_handler,
     make_visibility_middleware,
-    report_status,
 )
 
 log = logging.getLogger("webui_node")
@@ -116,9 +115,8 @@ async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port:
     node = MeshNode(node_id=node_id, secret=secret, core_url=core_url)
     node.on("show_message", ui.show_message)
     node.on("change_color", ui.change_color)
-    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id, core_url=core_url))
+    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id))
     await node.start()
-    await report_status(node_id, visibility.visible, core_url=core_url)
 
     web_app = make_web_app(ui, visibility)
     runner = web.AppRunner(web_app)

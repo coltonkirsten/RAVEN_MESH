@@ -193,24 +193,7 @@ class AgentRuntime:
         elif action == "show":
             self.ui_visible = True
         await self.inspector.publish("ui_visibility", {"visible": self.ui_visible})
-        # Best-effort report to Core's admin (added by worker A; safe to fail).
-        asyncio.create_task(self._report_visibility())
         return {"ok": True, "visible": self.ui_visible}
-
-    async def _report_visibility(self) -> None:
-        import aiohttp as _aiohttp
-        token = os.environ.get("ADMIN_TOKEN", "admin-dev-token")
-        body = {"node_id": self.node.node_id, "visible": self.ui_visible}
-        try:
-            timeout = _aiohttp.ClientTimeout(total=3)
-            async with _aiohttp.ClientSession(timeout=timeout) as s:
-                await s.post(
-                    f"{self.node.core_url}/v0/admin/node_status",
-                    json=body,
-                    headers={"X-Admin-Token": token},
-                )
-        except Exception:
-            pass  # admin endpoint may not exist yet
 
 
 # ---------- control server (loopback only — bridge calls these) ----------

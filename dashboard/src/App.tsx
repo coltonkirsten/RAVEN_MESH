@@ -1,21 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Network, Boxes, EyeOff, RefreshCw, Cpu } from "lucide-react";
+import { Activity, Network, Boxes, RefreshCw, Cpu } from "lucide-react";
 import LiveLogs from "./pages/LiveLogs";
 import MeshBuilder from "./pages/MeshBuilder";
 import SurfaceInspector from "./pages/SurfaceInspector";
-import UiVisibility from "./pages/UiVisibility";
 import Processes from "./pages/Processes";
 import { getState, reload as adminReload } from "./lib/api";
 import type { AdminState } from "./lib/types";
 
-type PageKey = "logs" | "mesh" | "surfaces" | "visibility" | "processes";
+type PageKey = "logs" | "mesh" | "surfaces" | "processes";
 
 const PAGES: { key: PageKey; label: string; icon: any }[] = [
   { key: "logs", label: "Live Logs", icon: Activity },
   { key: "mesh", label: "Mesh Builder", icon: Network },
   { key: "surfaces", label: "Surfaces", icon: Boxes },
   { key: "processes", label: "Processes", icon: Cpu },
-  { key: "visibility", label: "UI Visibility", icon: EyeOff },
 ];
 
 export default function App() {

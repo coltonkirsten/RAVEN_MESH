@@ -11,8 +11,6 @@ Admin surfaces (see PRD §8):
     POST /v0/admin/manifest      — write+validate a new manifest YAML to disk
     POST /v0/admin/reload        — re-read the manifest currently on disk
     POST /v0/admin/invoke        — synthesize a signed envelope from a chosen node
-    POST /v0/admin/node_status   — node voluntarily reports UI visibility state
-    GET  /v0/admin/ui_state      — read all reported UI-bearing node states
 """
 from __future__ import annotations
 
@@ -116,8 +114,6 @@ class CoreState:
         # Admin tap.
         self._admin_streams: set[asyncio.Queue] = set()
         self.envelope_tail: collections.deque = collections.deque(maxlen=ENVELOPE_TAIL_MAX)
-        # Voluntarily reported UI visibility per node.
-        self.node_status: dict[str, dict] = {}
         # Process supervisor (set by make_app after manifest loads).
         # Optional — Core works fine without it; falls back to scripts/run_mesh.sh
         # owning processes. When attached, /v0/admin/{spawn,stop,restart,reconcile}
@@ -511,7 +507,6 @@ async def handle_admin_state(request: web.Request) -> web.Response:
         "nodes": _nodes_state_view(state),
         "relationships": [{"from": f, "to": t} for f, t in sorted(state.edges)],
         "envelope_tail": list(state.envelope_tail),
-        "node_status": state.node_status,
     })
 
 
@@ -756,29 +751,6 @@ async def handle_admin_invoke(request: web.Request) -> web.Response:
     return web.json_response(result, status=status)
 
 
-async def handle_admin_node_status(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    body = await request.json()
-    node_id = body.get("node_id")
-    if not node_id or node_id not in state.nodes_decl:
-        return web.json_response({"error": "unknown_node"}, status=404)
-    state.node_status[node_id] = {
-        "visible": bool(body.get("visible", True)),
-        "ts": now_iso(),
-        "details": body.get("details", {}),
-    }
-    return web.json_response({"ok": True})
-
-
-async def handle_admin_ui_state(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    return web.json_response({"node_status": state.node_status})
-
-
 @web.middleware
 async def _cors_middleware(request: web.Request, handler):
     if request.method == "OPTIONS":
@@ -931,8 +903,6 @@ def make_app(
     app.router.add_post("/v0/admin/manifest", handle_admin_manifest)
     app.router.add_post("/v0/admin/reload", handle_admin_reload)
     app.router.add_post("/v0/admin/invoke", handle_admin_invoke)
-    app.router.add_post("/v0/admin/node_status", handle_admin_node_status)
-    app.router.add_get("/v0/admin/ui_state", handle_admin_ui_state)
     # Supervisor endpoints (always registered; no-op if supervisor disabled).
     app.router.add_get("/v0/admin/processes", handle_admin_processes)
     app.router.add_post("/v0/admin/spawn", handle_admin_spawn)

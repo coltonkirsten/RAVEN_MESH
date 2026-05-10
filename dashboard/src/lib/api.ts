@@ -66,12 +66,6 @@ export async function getState(): Promise<AdminState> {
   return r.json();
 }
 
-export async function getUiState(): Promise<{ node_status: AdminState["node_status"] }> {
-  const r = await fetch(`${BASE}/ui_state`);
-  if (!r.ok) throw new Error(`ui_state ${r.status}`);
-  return r.json();
-}
-
 export async function adminInvoke(args: {
   from_node: string;
   target: string;

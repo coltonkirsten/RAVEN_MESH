@@ -35,7 +35,6 @@ from nodes.ui_visibility import (
     VisibilityState,
     make_handler as make_visibility_handler,
     make_visibility_middleware,
-    report_status,
 )
 
 from .audio_io import (AudioUnavailable, MicCapture, SpeakerPlayback,
@@ -745,10 +744,9 @@ async def run(node_id: str, secret: str, core_url: str,
     node.on("stop_session", va.stop_session)
     node.on("say", va.say)
     node.on("session_status", va.session_status)
-    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id, core_url=core_url))
+    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id))
 
     await node.start()
-    await report_status(node_id, visibility.visible, core_url=core_url)
 
     web_app = make_web_app(va, visibility)
     runner = web.AppRunner(web_app)

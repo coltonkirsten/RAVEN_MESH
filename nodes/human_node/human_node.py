@@ -27,7 +27,6 @@ from nodes.ui_visibility import (
     VisibilityState,
     make_handler as make_visibility_handler,
     make_visibility_middleware,
-    report_status,
 )
 
 log = logging.getLogger("human_node")
@@ -179,9 +178,8 @@ async def run(node_id: str, secret: str, core_url: str, web_host: str, web_port:
     human = HumanNode(node)
     visibility = VisibilityState(visible=True)
     node.on("inbox", human.on_inbox)
-    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id, core_url=core_url))
+    node.on("ui_visibility", make_visibility_handler(visibility, node_id=node_id))
     await node.serve()
-    await report_status(node_id, visibility.visible, core_url=core_url)
 
     web_app = make_web_app(human, visibility, core_url=core_url, admin_token=admin_token)
     runner = web.AppRunner(web_app)

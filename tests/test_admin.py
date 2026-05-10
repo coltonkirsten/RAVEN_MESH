@@ -251,19 +251,3 @@ async def test_node_queue_is_bounded(core_server):
         target_queue.put_nowait({"type": "deliver", "data": {}})
 
 
-async def test_admin_node_status_and_ui_state(core_server):
-    url = core_server["url"]
-    async with aiohttp.ClientSession() as s:
-        async with s.post(f"{url}/v0/admin/node_status", headers=HEADERS, json={
-            "node_id": "tasks", "visible": False,
-        }) as r:
-            assert r.status == 200
-        async with s.get(f"{url}/v0/admin/ui_state", headers=HEADERS) as r:
-            assert r.status == 200
-            data = await r.json()
-        assert data["node_status"]["tasks"]["visible"] is False
-        # Unknown node rejected.
-        async with s.post(f"{url}/v0/admin/node_status", headers=HEADERS, json={
-            "node_id": "ghost", "visible": True,
-        }) as r:
-            assert r.status == 404

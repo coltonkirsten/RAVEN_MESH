@@ -30,17 +30,10 @@ export type EnvelopeEvent = {
   route_status: string;
 };
 
-export type NodeStatus = {
-  visible: boolean;
-  ts: string;
-  details: Record<string, any>;
-};
-
 export type AdminState = {
   manifest_path: string;
   audit_path: string;
   nodes: Node[];
   relationships: Relationship[];
   envelope_tail: EnvelopeEvent[];
-  node_status: Record<string, NodeStatus>;
 };
