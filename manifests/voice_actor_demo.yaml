@@ -1,0 +1,126 @@
+# RAVEN Mesh — voice_actor_demo manifest.
+#
+# End-to-end voice loop:
+#   1. Operator starts the mesh with this manifest.
+#   2. Operator (or human_node UI) calls voice_actor.start_session with
+#      on_user_transcript_node=nexus_agent. The Realtime session opens.
+#   3. Human speaks into the mic. The model talks back through the speakers,
+#      and a parallel transcription drops the user's words into
+#      nexus_agent.inbox so the agent can react.
+#   4. The agent can also call voice_actor.say { text } to make the voice
+#      utter a precise line, or voice_actor.stop_session to end the call.
+#
+# Uses nexus_agent (host variant, NOT isolated).
+
+nodes:
+  - id: voice_actor
+    kind: capability
+    runtime: local-process
+    identity_secret: env:VOICE_ACTOR_SECRET
+    metadata:
+      location_hint: mac-mini
+      description: Bidirectional voice node backed by OpenAI Realtime API (gpt-realtime-2).
+    surfaces:
+      - name: start_session
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/voice_start_session.json
+      - name: stop_session
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/voice_stop_session.json
+      - name: say
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/voice_say.json
+      - name: session_status
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/voice_session_status.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/ui_visibility.json
+
+  - id: nexus_agent
+    kind: actor
+    runtime: local-process
+    identity_secret: env:NEXUS_AGENT_SECRET
+    metadata:
+      location_hint: mac-mini
+      description: Claude-Code-driven autonomous agent (host variant).
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/generic_inbox.json
+      - name: status
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/nexus_agent_status.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/ui_visibility.json
+
+  - id: webui_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:WEBUI_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: show_message
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/webui_show_message.json
+      - name: change_color
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/webui_change_color.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/ui_visibility.json
+
+  - id: human_node
+    kind: actor
+    runtime: local-process
+    identity_secret: env:HUMAN_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/generic_inbox.json
+      - name: ui_visibility
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/ui_visibility.json
+
+relationships:
+  # Agent drives the voice node.
+  - { from: nexus_agent, to: voice_actor.start_session }
+  - { from: nexus_agent, to: voice_actor.stop_session }
+  - { from: nexus_agent, to: voice_actor.say }
+  - { from: nexus_agent, to: voice_actor.session_status }
+  - { from: nexus_agent, to: voice_actor.ui_visibility }
+
+  # Voice node forwards user transcripts back to the agent.
+  - { from: voice_actor, to: nexus_agent.inbox }
+
+  # Agent's existing affordances (kept minimal for this demo).
+  - { from: nexus_agent, to: webui_node.show_message }
+  - { from: nexus_agent, to: webui_node.change_color }
+  - { from: nexus_agent, to: nexus_agent.inbox }
+
+  # Humans can poke the voice node directly through the human dashboard.
+  - { from: human_node, to: voice_actor.start_session }
+  - { from: human_node, to: voice_actor.stop_session }
+  - { from: human_node, to: voice_actor.say }
+  - { from: human_node, to: voice_actor.session_status }
+  - { from: human_node, to: voice_actor.ui_visibility }
+  - { from: human_node, to: nexus_agent.inbox }
+  - { from: human_node, to: webui_node.show_message }
+  - { from: human_node, to: webui_node.change_color }

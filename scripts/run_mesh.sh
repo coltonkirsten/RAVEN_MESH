@@ -34,6 +34,7 @@ declare -a UI_NODES=(
   "nexus_agent|http://localhost:8804|nexus agent inspector"
   "kanban_node|http://localhost:8805|kanban board"
   "nexus_agent_isolated|http://localhost:8806|nexus agent (isolated) inspector"
+  "voice_actor|http://localhost:8807|voice actor"
 )
 
 start_one() {

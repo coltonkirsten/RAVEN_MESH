@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>RAVEN Mesh — voice_actor</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+         margin: 0; background: #0c0d10; color: #e6e6ea; }
+  header { padding: 1rem 1.5rem; border-bottom: 1px solid #1f2129;
+           display: flex; justify-content: space-between; align-items: center; }
+  header h1 { margin: 0; font-size: 1.05rem; font-weight: 600; letter-spacing: 0.02em; }
+  .pill { padding: 2px 10px; border-radius: 999px; font-size: 0.75rem;
+          background: #1f2129; color: #9aa0aa; }
+  .pill.ok { background: #143a22; color: #62d18b; }
+  .pill.warn { background: #3a2c14; color: #d1a162; }
+  .pill.err { background: #3a1414; color: #ff6e6e; }
+  .pill.live { background: #14253a; color: #62a4d1; }
+  main { display: grid; grid-template-columns: 1fr 1.2fr; gap: 1px;
+         background: #1f2129; min-height: calc(100vh - 60px); }
+  section { background: #0c0d10; padding: 1.25rem 1.5rem; }
+  h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em;
+       color: #6e7480; margin: 0 0 .8rem 0; font-weight: 600; }
+  .status-row { display: flex; align-items: center; gap: .8rem; margin-bottom: 1.2rem; }
+  .status-dot { width: 14px; height: 14px; border-radius: 50%;
+                background: #555a66; box-shadow: 0 0 0 0 rgba(0,0,0,0); transition: all .2s; }
+  .status-dot.listening { background: #62a4d1; box-shadow: 0 0 16px #62a4d1aa; }
+  .status-dot.speaking  { background: #62d18b; box-shadow: 0 0 18px #62d18baa; animation: pulse 1.2s infinite; }
+  .status-dot.processing { background: #d1a162; box-shadow: 0 0 14px #d1a162aa; }
+  .status-dot.error     { background: #ff6e6e; box-shadow: 0 0 14px #ff6e6eaa; }
+  .status-text { font-size: 1.4rem; font-weight: 500; }
+  @keyframes pulse { 0% { opacity: 1 } 50% { opacity: .55 } 100% { opacity: 1 } }
+  .meter { height: 8px; background: #181a22; border-radius: 4px; overflow: hidden; margin-bottom: 1.2rem; }
+  .meter > div { height: 100%; width: 0; background: linear-gradient(90deg, #62d18b, #d1a162, #ff6e6e);
+                 transition: width .08s linear; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: .35rem .8rem; font-size: .9rem; }
+  .kv dt { color: #6e7480; }
+  .kv dd { margin: 0; word-break: break-word; }
+  .banner { padding: .8rem 1rem; border-radius: 6px; margin-bottom: 1rem;
+            background: #3a2c14; color: #d1a162; font-size: .9rem; }
+  .banner.err { background: #3a1414; color: #ff8a8a; }
+  form { display: flex; flex-direction: column; gap: .55rem; margin-top: 1rem; }
+  label { font-size: .78rem; color: #6e7480; text-transform: uppercase; letter-spacing: .06em; }
+  input, textarea, select {
+    background: #14161e; color: #e6e6ea; border: 1px solid #1f2129;
+    border-radius: 4px; padding: .5rem .65rem; font: inherit; }
+  textarea { min-height: 60px; resize: vertical; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; }
+  button { background: #1f3a55; color: #cfe6ff; border: 1px solid #2a4d70;
+           padding: .5rem .9rem; border-radius: 4px; font: inherit; cursor: pointer; }
+  button:hover { background: #25496e; }
+  button.danger { background: #3a1414; color: #ffb3b3; border-color: #5a2222; }
+  button.danger:hover { background: #4d1a1a; }
+  .log { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .82rem;
+         max-height: 60vh; overflow-y: auto; border-top: 1px solid #1f2129; padding-top: .8rem; }
+  .log .entry { padding: .35rem 0; border-bottom: 1px dashed #181a22; }
+  .log .role { display: inline-block; min-width: 70px; font-weight: 600; }
+  .role.user { color: #62a4d1; }
+  .role.assistant { color: #62d18b; }
+  .ts { color: #555a66; font-size: .7rem; margin-left: .5rem; }
+  small.muted { color: #555a66; }
+  hr { border: none; border-top: 1px solid #1f2129; margin: 1.2rem 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>voice_actor</h1>
+  <div id="pills"></div>
+</header>
+<main>
+  <section>
+    <h2>Status</h2>
+    <div class="status-row">
+      <div id="dot" class="status-dot"></div>
+      <div id="status" class="status-text">idle</div>
+    </div>
+    <div class="meter"><div id="meter"></div></div>
+    <div id="banner-host"></div>
+    <h2>Session</h2>
+    <dl class="kv" id="session-kv">
+      <dt>state</dt><dd id="s-state">no active session</dd>
+    </dl>
+    <hr/>
+    <h2>Manual controls</h2>
+    <form id="start-form">
+      <label>voice</label>
+      <select name="voice">
+        <option>alloy</option><option>echo</option><option>shimmer</option>
+        <option>verse</option><option>ash</option><option>coral</option>
+        <option>ballad</option><option>sage</option>
+      </select>
+      <label>system_prompt</label>
+      <textarea name="system_prompt" placeholder="optional"></textarea>
+      <label>on_user_transcript_node (e.g. nexus_agent)</label>
+      <input name="on_user_transcript_node" placeholder="optional" />
+      <div class="row">
+        <button type="submit">Start session</button>
+        <button type="button" class="danger" id="stop-btn">Stop</button>
+      </div>
+    </form>
+    <form id="say-form">
+      <label>inject text</label>
+      <textarea name="text" placeholder="something for the model to say"></textarea>
+      <div class="row">
+        <button type="submit">Inject</button>
+      </div>
+    </form>
+  </section>
+  <section>
+    <h2>Transcript</h2>
+    <div id="log" class="log"></div>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function pill(label, cls) { return `<span class="pill ${cls||''}">${label}</span>`; }
+  function fmtTs(s) { try { return new Date(s).toLocaleTimeString(); } catch(_) { return s||''; } }
+  function applyState(st) {
+    const pills = [];
+    pills.push(pill(st.model || 'gpt-realtime-2'));
+    pills.push(st.key_present ? pill('key OK', 'ok') : pill('OPENAI_API_KEY missing', 'err'));
+    if (st.devices) {
+      pills.push(st.devices.input_ok ? pill('mic OK', 'ok') : pill('no mic', 'warn'));
+      pills.push(st.devices.output_ok ? pill('speaker OK', 'ok') : pill('no speaker', 'warn'));
+    }
+    if (st.active) pills.push(pill('LIVE', 'live'));
+    $('pills').innerHTML = pills.join(' ');
+
+    const dot = $('dot');
+    dot.className = 'status-dot ' + (st.status || 'idle');
+    $('status').textContent = st.status || 'idle';
+
+    const banner = $('banner-host');
+    if (!st.key_present) {
+      banner.innerHTML = `<div class="banner err">Set <code>OPENAI_API_KEY</code> in the environment, then restart the voice_actor process.</div>`;
+    } else if (st.devices && (!st.devices.input_ok || !st.devices.output_ok)) {
+      banner.innerHTML = `<div class="banner">Audio device issue — input_ok=${st.devices.input_ok} output_ok=${st.devices.output_ok}</div>`;
+    } else {
+      banner.innerHTML = '';
+    }
+
+    const sess = st.session;
+    const kv = $('session-kv');
+    if (!sess) {
+      kv.innerHTML = `<dt>state</dt><dd>no active session</dd>`;
+      $('meter').style.width = '0%';
+    } else {
+      const rms = Math.min(1, sess.mic_rms || 0);
+      $('meter').style.width = (rms * 100).toFixed(0) + '%';
+      kv.innerHTML = `
+        <dt>session_id</dt><dd>${sess.id}</dd>
+        <dt>voice</dt><dd>${sess.voice}</dd>
+        <dt>started</dt><dd>${fmtTs(sess.started_at)}</dd>
+        <dt>system_prompt</dt><dd><small class="muted">${(sess.system_prompt||'(default)')}</small></dd>
+        <dt>user → target</dt><dd>${sess.user_target || (sess.user_target_node ? sess.user_target_node + '.inbox' : '(none)')}</dd>
+        <dt>asst → target</dt><dd>${sess.assistant_target || '(none)'}</dd>
+        <dt>last user</dt><dd>${sess.last_user_transcript || '—'}</dd>
+        <dt>last asst</dt><dd>${sess.last_assistant_transcript || '—'}</dd>
+        ${sess.error ? `<dt>error</dt><dd style="color:#ff8a8a">${sess.error}</dd>` : ''}
+      `;
+    }
+
+    const log = (st.transcript || []).slice().reverse();
+    $('log').innerHTML = log.map(e =>
+      `<div class="entry"><span class="role ${e.role}">${e.role}</span>${(e.text||'').replace(/</g,'&lt;')}<span class="ts">${fmtTs(e.timestamp)}</span></div>`
+    ).join('') || '<div class="entry"><small class="muted">(no utterances yet)</small></div>';
+  }
+  function postJSON(url, body) {
+    return fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify(body || {}) }).then(r => r.json());
+  }
+  $('start-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const body = {};
+    for (const [k,v] of f.entries()) { if (v) body[k] = v; }
+    postJSON('/api/start', body).then(r => {
+      if (r.error) alert(r.error + ': ' + (r.detail||''));
+    });
+  });
+  $('say-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = new FormData(e.target).get('text');
+    if (!text) return;
+    postJSON('/api/say', { text }).then(r => {
+      if (r.error) alert(r.error + ': ' + (r.detail||''));
+      else e.target.reset();
+    });
+  });
+  $('stop-btn').addEventListener('click', () => postJSON('/api/stop'));
+
+  fetch('/state').then(r => r.json()).then(applyState).catch(()=>{});
+  const es = new EventSource('/events');
+  es.addEventListener('state', (e) => { try { applyState(JSON.parse(e.data)); } catch(_) {} });
+</script>
+</body>
+</html>

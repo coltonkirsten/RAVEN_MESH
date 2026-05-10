@@ -1,0 +1,8 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "voice_session_status",
+  "description": "Returns metadata about the currently active voice session, if any.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

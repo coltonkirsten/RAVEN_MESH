@@ -1,0 +1,8 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "voice_stop_session",
+  "description": "Close any active Realtime API voice session.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}
