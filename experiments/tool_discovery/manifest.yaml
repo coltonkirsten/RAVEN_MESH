@@ -1,0 +1,99 @@
+# RAVEN Mesh — tool_discovery manifest.
+#
+# Sandbox for the schema-driven LLM composer experiment. Wires together:
+#
+#   composer_agent  — LLM-driven actor. Discovers its tools at boot from
+#                     Core's /v0/admin/state and exposes a single ``compose``
+#                     surface that takes a natural-language goal.
+#   kanban_node     — primary "real" tool target. Has a rich surface set so
+#                     the planner has meaningful choices (create, move,
+#                     update, list, ...).
+#   voice_actor     — secondary tool target. Demonstrates that multi-node
+#                     chains work — composer can both create a kanban card
+#                     AND speak about it.
+#   webui_node      — the "dashboard" node. composer can show messages
+#                     here as a side-effect of plan execution.
+#   human_node      — actor with a dashboard to manually drive composer for
+#                     interactive testing (open http://127.0.0.1:8802).
+
+nodes:
+  - id: composer_agent
+    kind: actor
+    runtime: local-process
+    identity_secret: env:COMPOSER_AGENT_SECRET
+    metadata:
+      location_hint: mac-mini
+      description: Schema-driven LLM tool composer (gpt-4o-mini).
+    surfaces:
+      - name: compose
+        type: tool
+        invocation_mode: request_response
+        schema: ./compose.json
+
+  - id: kanban_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:KANBAN_NODE_SECRET
+    metadata: { location_hint: mac-mini }
+    surfaces:
+      - { name: create_card,   type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_create_card.json }
+      - { name: move_card,     type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_move_card.json }
+      - { name: update_card,   type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_update_card.json }
+      - { name: delete_card,   type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_delete_card.json }
+      - { name: list_cards,    type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_list_cards.json }
+      - { name: get_board,     type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_get_board.json }
+      - { name: add_column,    type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_add_column.json }
+      - { name: delete_column, type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_delete_column.json }
+      - { name: ui_visibility, type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_ui_visibility.json }
+      - { name: status_get,    type: tool, invocation_mode: request_response, schema: ../../schemas/kanban_status_get.json }
+
+  - id: voice_actor
+    kind: capability
+    runtime: local-process
+    identity_secret: env:VOICE_ACTOR_SECRET
+    metadata: { location_hint: mac-mini }
+    surfaces:
+      - { name: start_session,  type: tool, invocation_mode: request_response, schema: ../../schemas/voice_start_session.json }
+      - { name: stop_session,   type: tool, invocation_mode: request_response, schema: ../../schemas/voice_stop_session.json }
+      - { name: say,            type: tool, invocation_mode: request_response, schema: ../../schemas/voice_say.json }
+      - { name: session_status, type: tool, invocation_mode: request_response, schema: ../../schemas/voice_session_status.json }
+      - { name: ui_visibility,  type: tool, invocation_mode: request_response, schema: ../../schemas/ui_visibility.json }
+
+  - id: webui_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:WEBUI_NODE_SECRET
+    metadata: { location_hint: mac-mini }
+    surfaces:
+      - { name: show_message,  type: tool, invocation_mode: request_response, schema: ../../schemas/webui_show_message.json }
+      - { name: change_color,  type: tool, invocation_mode: request_response, schema: ../../schemas/webui_change_color.json }
+      - { name: ui_visibility, type: tool, invocation_mode: request_response, schema: ../../schemas/ui_visibility.json }
+
+  - id: human_node
+    kind: actor
+    runtime: local-process
+    identity_secret: env:HUMAN_NODE_SECRET
+    metadata: { location_hint: mac-mini }
+    surfaces:
+      - { name: inbox,         type: inbox, invocation_mode: fire_and_forget, schema: ../../schemas/generic_inbox.json }
+      - { name: ui_visibility, type: tool,  invocation_mode: request_response, schema: ../../schemas/ui_visibility.json }
+
+relationships:
+  # composer_agent reaches all the tool surfaces. Discovery walks these edges.
+  - { from: composer_agent, to: kanban_node.create_card }
+  - { from: composer_agent, to: kanban_node.move_card }
+  - { from: composer_agent, to: kanban_node.update_card }
+  - { from: composer_agent, to: kanban_node.delete_card }
+  - { from: composer_agent, to: kanban_node.list_cards }
+  - { from: composer_agent, to: kanban_node.get_board }
+  - { from: composer_agent, to: kanban_node.add_column }
+  - { from: composer_agent, to: voice_actor.say }
+  - { from: composer_agent, to: voice_actor.session_status }
+  - { from: composer_agent, to: webui_node.show_message }
+  - { from: composer_agent, to: webui_node.change_color }
+
+  # human_node can drive the composer manually from its dashboard.
+  - { from: human_node, to: composer_agent.compose }
+  - { from: human_node, to: kanban_node.list_cards }
+  - { from: human_node, to: kanban_node.get_board }
+  - { from: human_node, to: webui_node.show_message }
