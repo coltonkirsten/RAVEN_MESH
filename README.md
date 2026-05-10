@@ -55,6 +55,16 @@ docs/
   PROTOTYPE.md    how this Python implementation is structured + how to refactor away
 ```
 
+## Configuration
+
+Core's non-secret tunables (host, port, manifest path, admin rate limits, replay window, supervisor toggles, audit log path) load from a TOML file with env-var and CLI overrides. Secrets stay in env vars only.
+
+**Precedence (highest wins):** CLI flag → env var (`MESH_HOST`, `MESH_PORT`, …) → TOML file → built-in default.
+
+- **TOML file:** `mesh.toml` in the working directory (or `configs/mesh.toml`, or pass `--config path/to/file.toml`, or set `MESH_CONFIG`). See [`mesh.toml.example`](mesh.toml.example) for the full schema with comments.
+- **Secrets stay env-only:** `ADMIN_TOKEN` and per-node `identity_secret` (resolved via `env:VAR_NAME` in the manifest) are never read from the TOML.
+- **Inspect resolved config:** `python3 -m core.core --dump-config` prints the merged values with a `# from <source>` comment on every line.
+
 ## Spec
 
 - **Wire protocol & envelope:** [docs/PROTOCOL.md](docs/PROTOCOL.md)

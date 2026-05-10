@@ -34,6 +34,14 @@ import yaml
 from aiohttp import web
 from jsonschema import ValidationError, validate as jsonschema_validate
 
+from core.config import (
+    Config,
+    REPLAY_WINDOW_DEFAULT_S,
+    REPLAY_WINDOW_MAX_S,
+    REPLAY_WINDOW_MIN_S,
+    dump_config_toml,
+    load_config,
+)
 from core.manifest_validator import validate_manifest
 from core.supervisor import Supervisor, make_script_resolver
 
@@ -42,11 +50,6 @@ ENVELOPE_TAIL_MAX = 200
 NODE_QUEUE_MAX = 1024
 LEGACY_ADMIN_TOKEN = "admin-dev-token"
 ADMIN_RATE_BUCKET_MAX = 4096
-
-# Replay protection: per-protocol bounds on the timestamp window.
-REPLAY_WINDOW_MIN_S = 5
-REPLAY_WINDOW_MAX_S = 300
-REPLAY_WINDOW_DEFAULT_S = 60
 # Bound the nonce LRU. One entry ≈ a uuid4 string; 16k bounds memory at a few
 # hundred KB while comfortably exceeding any realistic message rate over a
 # 300s window.
@@ -197,9 +200,11 @@ def _admin_authed(request: web.Request) -> bool:
 # ---------- state ----------
 
 class CoreState:
-    def __init__(self, manifest_path: str, audit_path: str):
+    def __init__(self, manifest_path: str, audit_path: str,
+                 *, config: Config | None = None):
         self.manifest_path = pathlib.Path(manifest_path).resolve()
         self.audit_path = pathlib.Path(audit_path).resolve()
+        self.config: Config = config if config is not None else load_config(toml_path=None)
         self.nodes_decl: dict[str, dict] = {}
         self.connections: dict[str, dict] = {}
         self.sessions: dict[str, str] = {}
@@ -214,7 +219,7 @@ class CoreState:
         # across every replay-gated endpoint so the uniqueness invariant is
         # protocol-wide, not per-route.
         self._replay_nonces: collections.OrderedDict[str, None] = collections.OrderedDict()
-        self.replay_window_s: int = _load_replay_window_s()
+        self.replay_window_s: int = self.config.security.replay_window_s
         # Process supervisor (set by make_app after manifest loads).
         # Optional — Core works fine without it; falls back to scripts/run_mesh.sh
         # owning processes. When attached, /v0/admin/{spawn,stop,restart,reconcile}
@@ -517,7 +522,7 @@ async def _route_invocation(state: CoreState, env: dict,
     await state.audit(type="invocation", from_node=from_node, to_surface=to,
                       decision="routed", correlation_id=correlation_id, details={"msg_id": msg_id})
     state.emit_envelope(env=env, direction="in", signature_valid=True, route_status="routed")
-    timeout = float(os.environ.get("MESH_INVOKE_TIMEOUT", "30"))
+    timeout = float(state.config.server.invoke_timeout_s)
     try:
         result = await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:
@@ -985,16 +990,8 @@ class _AdminRateLimiter:
             self._buckets.pop(k, None)
 
 
-def _build_admin_rate_limiter() -> _AdminRateLimiter:
-    try:
-        rate = float(os.environ.get("MESH_ADMIN_RATE_LIMIT", "60"))
-    except ValueError:
-        rate = 60.0
-    try:
-        burst = float(os.environ.get("MESH_ADMIN_RATE_BURST", "20"))
-    except ValueError:
-        burst = 20.0
-    return _AdminRateLimiter(rate, burst)
+def _build_admin_rate_limiter(config: Config) -> _AdminRateLimiter:
+    return _AdminRateLimiter(config.admin.rate_limit, config.admin.rate_burst)
 
 
 def _admin_rate_key(request: web.Request) -> str:
@@ -1032,10 +1029,21 @@ def make_app(
     manifest_path: str,
     audit_path: str | None = None,
     *,
-    enable_supervisor: bool = False,
-    supervisor_log_dir: str = ".logs",
+    enable_supervisor: bool | None = None,
+    supervisor_log_dir: str | None = None,
+    config: Config | None = None,
 ) -> web.Application:
-    audit_path = audit_path or os.environ.get("AUDIT_LOG", "audit.log")
+    if config is None:
+        # No explicit config: build one with env-var precedence so legacy
+        # callers (tests, in-process embedders) keep working unchanged.
+        config = load_config(toml_path=None)
+    # Caller-explicit args trump config (back-compat for in-process embedders).
+    if audit_path is None:
+        audit_path = config.logging.audit_log_path
+    if enable_supervisor is None:
+        enable_supervisor = config.supervisor.enabled
+    if supervisor_log_dir is None:
+        supervisor_log_dir = config.supervisor.log_dir
     # Validate the admin token at boot — refusing to start with an unset or
     # legacy-default token. The token is then resolved per-request.
     admin_token()
@@ -1043,8 +1051,8 @@ def make_app(
         client_max_size=10 * 1024 * 1024,
         middlewares=[_cors_middleware, _admin_rate_limit_middleware],
     )
-    app["admin_rate_limiter"] = _build_admin_rate_limiter()
-    state = CoreState(manifest_path, audit_path)
+    app["admin_rate_limiter"] = _build_admin_rate_limiter(config)
+    state = CoreState(manifest_path, audit_path, config=config)
     state.load_manifest()
     if enable_supervisor:
         repo_root = state.manifest_path.parent.parent  # manifests/foo.yaml -> repo
@@ -1105,32 +1113,29 @@ def make_app(
     return app
 
 
-async def amain(
-    manifest_path: str,
-    host: str,
-    port: int,
-    audit_path: str | None,
-    *,
-    enable_supervisor: bool = False,
-    supervisor_log_dir: str = ".logs",
-    auto_reconcile: bool = False,
-) -> None:
+async def amain(config: Config) -> None:
     app = make_app(
-        manifest_path,
-        audit_path,
-        enable_supervisor=enable_supervisor,
-        supervisor_log_dir=supervisor_log_dir,
+        config.server.manifest_path,
+        config.logging.audit_log_path,
+        enable_supervisor=config.supervisor.enabled,
+        supervisor_log_dir=config.supervisor.log_dir,
+        config=config,
     )
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host, port)
+    site = web.TCPSite(runner, config.server.host, config.server.port)
     await site.start()
-    sup_msg = " supervisor=on" if enable_supervisor else ""
-    print(f"[core] listening on http://{host}:{port}  manifest={manifest_path}{sup_msg}", flush=True)
+    sup_msg = " supervisor=on" if config.supervisor.enabled else ""
+    print(
+        f"[core] listening on http://{config.server.host}:{config.server.port}  "
+        f"manifest={config.server.manifest_path}{sup_msg}",
+        flush=True,
+    )
 
     state: CoreState = app["state"]
 
-    if enable_supervisor and auto_reconcile and state.supervisor is not None:
+    if config.supervisor.enabled and config.supervisor.auto_reconcile \
+            and state.supervisor is not None:
         # Boot every node declared in the manifest immediately. The supervisor
         # will restart any that crash. This makes Core a self-contained mesh
         # bootstrap: `python -m core.core --supervisor --auto-reconcile` brings
@@ -1151,39 +1156,61 @@ async def amain(
     await runner.cleanup()
 
 
+def _resolve_config_path(cli_value: str | None) -> str | None:
+    if cli_value:
+        return cli_value
+    env_value = os.environ.get("MESH_CONFIG")
+    if env_value:
+        return env_value
+    for candidate in ("mesh.toml", "configs/mesh.toml"):
+        if pathlib.Path(candidate).exists():
+            return candidate
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="RAVEN Mesh Core")
-    p.add_argument("--manifest", default=os.environ.get("MESH_MANIFEST", "manifests/demo.yaml"))
-    p.add_argument("--host", default=os.environ.get("MESH_HOST", "127.0.0.1"))
-    p.add_argument("--port", type=int, default=int(os.environ.get("MESH_PORT", "8000")))
-    p.add_argument("--audit-log", default=os.environ.get("AUDIT_LOG", "audit.log"))
+    # Config file controls. CLI defaults are None for migrated flags so the
+    # config loader can distinguish "not set on command line" from a default.
+    p.add_argument(
+        "--config",
+        default=None,
+        help="Path to mesh.toml. Falls back to $MESH_CONFIG, then ./mesh.toml, "
+             "then ./configs/mesh.toml.",
+    )
+    p.add_argument(
+        "--dump-config",
+        action="store_true",
+        help="Print resolved config (with per-field source attribution) and exit.",
+    )
+    p.add_argument("--manifest", default=None)
+    p.add_argument("--host", default=None)
+    p.add_argument("--port", type=int, default=None)
+    p.add_argument("--audit-log", default=None)
     p.add_argument(
         "--supervisor",
         action="store_true",
-        default=os.environ.get("MESH_SUPERVISOR", "0") == "1",
+        default=None,
         help="Enable the in-core process supervisor (own node lifecycle).",
     )
-    p.add_argument(
-        "--supervisor-log-dir",
-        default=os.environ.get("MESH_SUPERVISOR_LOG_DIR", ".logs"),
-    )
+    p.add_argument("--supervisor-log-dir", default=None)
     p.add_argument(
         "--auto-reconcile",
         action="store_true",
-        default=os.environ.get("MESH_AUTO_RECONCILE", "0") == "1",
+        default=None,
         help="With --supervisor: spawn all manifest nodes at startup.",
     )
     args = p.parse_args(argv)
+
+    toml_path = _resolve_config_path(args.config)
+    config = load_config(toml_path=toml_path, env=os.environ, cli_args=args)
+
+    if args.dump_config:
+        sys.stdout.write(dump_config_toml(config))
+        return 0
+
     try:
-        asyncio.run(amain(
-            args.manifest,
-            args.host,
-            args.port,
-            args.audit_log,
-            enable_supervisor=args.supervisor,
-            supervisor_log_dir=args.supervisor_log_dir,
-            auto_reconcile=args.auto_reconcile,
-        ))
+        asyncio.run(amain(config))
     except KeyboardInterrupt:
         pass
     return 0
