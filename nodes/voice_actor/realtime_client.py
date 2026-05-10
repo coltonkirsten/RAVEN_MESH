@@ -30,7 +30,7 @@ class RealtimeClient:
     `run()` which dispatches by event type).
     """
 
-    def __init__(self, api_key: str, model: str = "gpt-realtime-2",
+    def __init__(self, api_key: str, model: str = "gpt-realtime",
                  session_config: Optional[dict] = None) -> None:
         self.api_key = api_key
         self.model = model
@@ -45,9 +45,9 @@ class RealtimeClient:
 
     async def connect(self) -> None:
         url = f"{REALTIME_URL}?model={self.model}"
+        # GA Realtime API: no OpenAI-Beta header.
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "OpenAI-Beta": "realtime=v1",
         }
         self._session = aiohttp.ClientSession()
         try:
@@ -91,7 +91,7 @@ class RealtimeClient:
             "content": [{"type": "text", "text": text}],
         }
         await self._send({"type": "conversation.item.create", "item": item})
-        await self.create_response({"modalities": ["audio", "text"]})
+        await self.create_response({"output_modalities": ["audio"]})
 
     async def say_now(self, text: str, voice: Optional[str] = None) -> None:
         """Force the model to read `text` aloud verbatim.
@@ -104,11 +104,11 @@ class RealtimeClient:
             f"additions or commentary:\n\n{text}"
         )
         opts: dict = {
-            "modalities": ["audio", "text"],
+            "output_modalities": ["audio"],
             "instructions": instructions,
         }
         if voice:
-            opts["voice"] = voice
+            opts["audio"] = {"output": {"voice": voice}}
         await self.create_response(opts)
 
     async def create_response(self, options: Optional[dict] = None) -> None:

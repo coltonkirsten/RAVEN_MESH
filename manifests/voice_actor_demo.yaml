@@ -110,6 +110,9 @@ relationships:
   # Voice node forwards user transcripts back to the agent.
   - { from: voice_actor, to: nexus_agent.inbox }
 
+  # Voice node can also message the human directly (dashboard inbox).
+  - { from: voice_actor, to: human_node.inbox }
+
   # Agent's existing affordances (kept minimal for this demo).
   - { from: nexus_agent, to: webui_node.show_message }
   - { from: nexus_agent, to: webui_node.change_color }

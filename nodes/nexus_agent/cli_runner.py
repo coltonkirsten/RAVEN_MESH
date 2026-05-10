@@ -16,6 +16,7 @@ import logging
 import os
 import pathlib
 import shutil
+import sys
 import tempfile
 from typing import Any, Awaitable, Callable
 
@@ -51,10 +52,14 @@ def write_mcp_config(
     if extra_env:
         env.update(extra_env)
 
+    # Use the parent's interpreter (sys.executable) so the bridge inherits the
+    # same venv / site-packages as the agent. A literal "python3" here resolves
+    # via PATH at child-spawn time, which lands on system python without mcp /
+    # aiohttp installed and the bridge dies on import → claude sees zero tools.
     config = {
         "mcpServers": {
             "nexus_agent_bridge": {
-                "command": "python3",
+                "command": sys.executable,
                 "args": [str(bridge_path)],
                 "env": env,
             }

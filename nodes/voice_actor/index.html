@@ -33,6 +33,16 @@
   .meter { height: 8px; background: #181a22; border-radius: 4px; overflow: hidden; margin-bottom: 1.2rem; }
   .meter > div { height: 100%; width: 0; background: linear-gradient(90deg, #62d18b, #d1a162, #ff6e6e);
                  transition: width .08s linear; }
+  .viz-wrap { background: #14161e; border: 1px solid #1f2129; border-radius: 6px;
+              padding: .8rem; margin-bottom: 1.2rem; }
+  .viz-row { display: flex; align-items: center; gap: .6rem; margin-bottom: .35rem; }
+  .viz-row:last-child { margin-bottom: 0; }
+  .viz-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em;
+               color: #6e7480; width: 36px; }
+  .viz-canvas { flex: 1; height: 38px; background: #0c0d10; border-radius: 4px;
+                display: block; }
+  .viz-num { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .72rem;
+             color: #6e7480; width: 38px; text-align: right; }
   .kv { display: grid; grid-template-columns: 130px 1fr; gap: .35rem .8rem; font-size: .9rem; }
   .kv dt { color: #6e7480; }
   .kv dd { margin: 0; word-break: break-word; }
@@ -74,7 +84,18 @@
       <div id="dot" class="status-dot"></div>
       <div id="status" class="status-text">idle</div>
     </div>
-    <div class="meter"><div id="meter"></div></div>
+    <div class="viz-wrap">
+      <div class="viz-row">
+        <span class="viz-label">mic</span>
+        <canvas id="viz-mic" class="viz-canvas"></canvas>
+        <span id="viz-mic-num" class="viz-num">0%</span>
+      </div>
+      <div class="viz-row">
+        <span class="viz-label">out</span>
+        <canvas id="viz-spk" class="viz-canvas"></canvas>
+        <span id="viz-spk-num" class="viz-num">0%</span>
+      </div>
+    </div>
     <div id="banner-host"></div>
     <h2>Session</h2>
     <dl class="kv" id="session-kv">
@@ -88,6 +109,14 @@
         <option>alloy</option><option>echo</option><option>shimmer</option>
         <option>verse</option><option>ash</option><option>coral</option>
         <option>ballad</option><option>sage</option>
+      </select>
+      <label>input device (mic)</label>
+      <select name="input_device" id="input-device-select">
+        <option value="">(auto)</option>
+      </select>
+      <label>output device (speaker)</label>
+      <select name="output_device" id="output-device-select">
+        <option value="">(auto)</option>
       </select>
       <label>system_prompt</label>
       <textarea name="system_prompt" placeholder="optional"></textarea>
@@ -113,11 +142,52 @@
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
+
+  // ---------- audio visualizer ----------
+  // Two scrolling-bar canvases driven by the latest mic/spk RMS values.
+  let currentMicRms = 0;
+  let currentSpkRms = 0;
+  const BAR_COUNT = 64;
+  const micBars = new Array(BAR_COUNT).fill(0);
+  const spkBars = new Array(BAR_COUNT).fill(0);
+  function drawBars(canvas, bars, color) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== w * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    const gap = 2, n = bars.length;
+    const bw = (w - gap * (n - 1)) / n;
+    for (let i = 0; i < n; i++) {
+      const v = bars[i];
+      const bh = Math.max(1, v * h);
+      const x = i * (bw + gap);
+      const y = (h - bh) / 2;
+      const grd = ctx.createLinearGradient(0, h, 0, 0);
+      grd.addColorStop(0, color.dim);
+      grd.addColorStop(1, color.bright);
+      ctx.fillStyle = grd;
+      ctx.fillRect(x, y, bw, bh);
+    }
+  }
+  function tick() {
+    // shape mic with a touch of curve so it looks more like a waveform
+    micBars.shift(); micBars.push(Math.pow(currentMicRms, 0.7));
+    spkBars.shift(); spkBars.push(Math.pow(currentSpkRms, 0.7));
+    const micEl = $('viz-mic'), spkEl = $('viz-spk');
+    if (micEl) drawBars(micEl, micBars, { dim: '#1f3a55', bright: '#62a4d1' });
+    if (spkEl) drawBars(spkEl, spkBars, { dim: '#143a22', bright: '#62d18b' });
+    const mn = $('viz-mic-num'); if (mn) mn.textContent = (currentMicRms * 100).toFixed(0) + '%';
+    const sn = $('viz-spk-num'); if (sn) sn.textContent = (currentSpkRms * 100).toFixed(0) + '%';
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
   function pill(label, cls) { return `<span class="pill ${cls||''}">${label}</span>`; }
   function fmtTs(s) { try { return new Date(s).toLocaleTimeString(); } catch(_) { return s||''; } }
   function applyState(st) {
     const pills = [];
-    pills.push(pill(st.model || 'gpt-realtime-2'));
+    pills.push(pill(st.model || 'gpt-realtime'));
     pills.push(st.key_present ? pill('key OK', 'ok') : pill('OPENAI_API_KEY missing', 'err'));
     if (st.devices) {
       pills.push(st.devices.input_ok ? pill('mic OK', 'ok') : pill('no mic', 'warn'));
@@ -143,13 +213,16 @@
     const kv = $('session-kv');
     if (!sess) {
       kv.innerHTML = `<dt>state</dt><dd>no active session</dd>`;
-      $('meter').style.width = '0%';
+      currentMicRms = 0;
+      currentSpkRms = 0;
     } else {
-      const rms = Math.min(1, sess.mic_rms || 0);
-      $('meter').style.width = (rms * 100).toFixed(0) + '%';
+      currentMicRms = Math.min(1, sess.mic_rms || 0);
+      currentSpkRms = Math.min(1, sess.spk_rms || 0);
       kv.innerHTML = `
         <dt>session_id</dt><dd>${sess.id}</dd>
         <dt>voice</dt><dd>${sess.voice}</dd>
+        <dt>input device</dt><dd>${sess.input_device_name || '(default)'}</dd>
+        <dt>output device</dt><dd>${sess.output_device_name || '(default)'}</dd>
         <dt>started</dt><dd>${fmtTs(sess.started_at)}</dd>
         <dt>system_prompt</dt><dd><small class="muted">${(sess.system_prompt||'(default)')}</small></dd>
         <dt>user → target</dt><dd>${sess.user_target || (sess.user_target_node ? sess.user_target_node + '.inbox' : '(none)')}</dd>
@@ -189,6 +262,28 @@
   });
   $('stop-btn').addEventListener('click', () => postJSON('/api/stop'));
 
+  function loadDevices() {
+    return fetch('/api/devices').then(r => r.json()).then(d => {
+      const inSel = $('input-device-select');
+      const outSel = $('output-device-select');
+      if (!inSel || !outSel) return;
+      const fill = (sel, list, defaultIdx) => {
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">(auto)</option>';
+        for (const dev of list) {
+          const o = document.createElement('option');
+          o.value = String(dev.index);
+          const isDefault = dev.index === defaultIdx ? ' • system default' : '';
+          o.textContent = `[${dev.index}] ${dev.name}${isDefault}`;
+          sel.appendChild(o);
+        }
+        if (cur) sel.value = cur;
+      };
+      fill(inSel, d.inputs || [], d.default_input_idx);
+      fill(outSel, d.outputs || [], d.default_output_idx);
+    }).catch(()=>{});
+  }
+  loadDevices();
   fetch('/state').then(r => r.json()).then(applyState).catch(()=>{});
   const es = new EventSource('/events');
   es.addEventListener('state', (e) => { try { applyState(JSON.parse(e.data)); } catch(_) {} });
