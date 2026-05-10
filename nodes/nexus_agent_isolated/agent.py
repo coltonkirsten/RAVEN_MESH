@@ -31,7 +31,7 @@ from aiohttp import web
 
 from node_sdk import MeshError, MeshNode
 
-from .docker_runner import CliResult, ensure_volume, run_claude_in_container
+from .docker_runner import ensure_volume, run_claude_in_container
 from .web.server import make_inspector_app, AgentInspectorState
 
 log = logging.getLogger("nexus_agent_isolated")

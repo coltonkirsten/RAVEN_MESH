@@ -42,19 +42,27 @@ Handler = Callable[[dict], Awaitable[Any]]
 
 
 def now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
 def canonical(obj: dict) -> str:
+    """Serialize an envelope deterministically for HMAC signing.
+
+    The ``signature`` field is excluded so signing is reproducible.
+    """
     body = {k: v for k, v in obj.items() if k != "signature"}
     return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def sign(obj: dict, secret: str) -> str:
+    """Compute the HMAC-SHA256 signature of ``obj`` with ``secret``."""
     return hmac.new(secret.encode(), canonical(obj).encode(), hashlib.sha256).hexdigest()
 
 
 class MeshError(Exception):
+    """Raised when Core returns a non-2xx HTTP status to a node call."""
+
     def __init__(self, status: int, data: Any):
         self.status = status
         self.data = data
@@ -62,6 +70,8 @@ class MeshError(Exception):
 
 
 class MeshDeny(Exception):
+    """Raised by a handler to send back a structured ``error`` envelope."""
+
     def __init__(self, reason: str, **details: Any):
         self.reason = reason
         self.details = details
@@ -69,6 +79,8 @@ class MeshDeny(Exception):
 
 
 class MeshNode:
+    """Mesh client: registers with Core, streams deliveries, dispatches handlers."""
+
     def __init__(
         self,
         node_id: str,
@@ -93,6 +105,7 @@ class MeshNode:
     # public ------------------------------------------------------------
 
     def on(self, surface_name: str, handler: Handler) -> None:
+        """Register an async ``handler(envelope) -> dict | None`` for a surface."""
         self.handlers[surface_name] = handler
 
     async def connect(self) -> None:
@@ -113,10 +126,12 @@ class MeshNode:
             log.warning("[%s] stream did not signal hello within 5s", self.node_id)
 
     async def start(self) -> None:
+        """Connect to Core and begin streaming deliveries (``connect`` + ``serve``)."""
         await self.connect()
         await self.serve()
 
     async def stop(self) -> None:
+        """Cancel the stream and dispatch tasks and close the HTTP session."""
         if self._stream_task:
             self._stream_task.cancel()
             try:
@@ -139,6 +154,10 @@ class MeshNode:
         wrapped: dict | None = None,
         correlation_id: str | None = None,
     ) -> dict:
+        """Send an invocation envelope to ``target_surface`` and return the response.
+
+        With ``wait=False`` Core returns 202 and this returns ``{"status":"accepted"}``.
+        """
         env = self._build_envelope("invocation", target_surface, payload,
                                     correlation_id=correlation_id, wrapped=wrapped)
         timeout = aiohttp.ClientTimeout(total=self.invoke_timeout + 5 if wait else 10)
@@ -152,6 +171,7 @@ class MeshNode:
             return data
 
     async def respond(self, original: dict, payload: dict, *, kind: str = "response") -> None:
+        """Send a ``response`` (or ``error``) envelope correlated to ``original``."""
         msg_id = str(uuid.uuid4())
         env = {
             "id": msg_id,

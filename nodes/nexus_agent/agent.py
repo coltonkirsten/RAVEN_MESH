@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as _dt
-import hashlib
 import json
 import logging
 import os

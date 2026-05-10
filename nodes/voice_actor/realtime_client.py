@@ -9,11 +9,10 @@ Audio format used here: 24 kHz mono PCM16, base64-encoded.
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
-from typing import AsyncIterator, Awaitable, Callable, Optional
+from typing import AsyncIterator, Optional
 
 import aiohttp
 

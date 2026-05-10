@@ -55,13 +55,12 @@ hot-add / hot-remove.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import pathlib
 import signal
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 log = logging.getLogger("supervisor")
@@ -103,6 +102,8 @@ class ChildSpec:
 
 @dataclass
 class ChildState:
+    """Mutable runtime state of a supervised child process."""
+
     spec: ChildSpec
     proc: Optional[asyncio.subprocess.Process] = None
     pid: Optional[int] = None
@@ -127,6 +128,7 @@ class ChildState:
     drain_done: Optional[asyncio.Event] = None
 
     def to_dict(self) -> dict:
+        """Serialize child state into a JSON-friendly dict for admin endpoints."""
         uptime = (time.time() - self.started_at) if self.status == "running" else 0.0
         return {
             "node_id": self.spec.node_id,
@@ -169,6 +171,12 @@ def _backoff_seconds(attempt: int) -> float:
 
 
 class Supervisor:
+    """Process supervisor: spawns, monitors, restarts, and drains child nodes.
+
+    PROTOCOL-LAYER: deliberately knows nothing about envelopes, surfaces, or
+    what nodes do — only process lifecycle.
+    """
+
     def __init__(
         self,
         runner_resolver: RunnerResolver,
@@ -214,6 +222,7 @@ class Supervisor:
             return await self._start_locked(spec)
 
     async def stop(self, node_id: str, graceful: bool = True, timeout: float = 5.0) -> dict:
+        """Stop a child. Cancels a pending restart if mid-backoff."""
         async with self.lock:
             child = self.children.get(node_id)
             if not child:
@@ -232,6 +241,7 @@ class Supervisor:
             return await self._stop_locked(child, graceful=graceful, timeout=timeout)
 
     async def restart(self, node_id: str, manifest_node: dict) -> dict:
+        """Stop the child if running, then start it from a fresh ChildSpec."""
         async with self.lock:
             child = self.children.get(node_id)
             if child and child.status in ("running", "starting"):
@@ -296,6 +306,7 @@ class Supervisor:
         return {"ok": True, "actions": actions}
 
     def list_processes(self) -> list[dict]:
+        """Return ``to_dict`` snapshots for every supervised child."""
         return [c.to_dict() for c in self.children.values()]
 
     # ---- on_demand: lazy spawn + idle reap (PROTOCOL-LAYER, generic) ----
@@ -479,6 +490,7 @@ class Supervisor:
         }
 
     async def shutdown_all(self, timeout: float = 5.0) -> None:
+        """Stop every supervised child and disable auto-restart on shutdown."""
         self._stopping = True
         async with self.lock:
             for child in list(self.children.values()):

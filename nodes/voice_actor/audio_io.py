@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import queue as _queue
 import threading
 from typing import Optional

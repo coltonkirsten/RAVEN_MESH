@@ -30,7 +30,6 @@ import pathlib
 import signal
 import sys
 import uuid
-from typing import Any
 
 from aiohttp import web
 

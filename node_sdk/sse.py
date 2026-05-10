@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from aiohttp import web
 
@@ -73,14 +73,17 @@ class SSEHub:
         self._subs: set[asyncio.Queue] = set()
 
     def add_subscriber(self, maxsize: int = 1024) -> asyncio.Queue:
+        """Register a new subscriber queue and return it for the connection to drain."""
         q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         self._subs.add(q)
         return q
 
     def remove_subscriber(self, q: asyncio.Queue) -> None:
+        """Detach a subscriber queue. Idempotent."""
         self._subs.discard(q)
 
     def broadcast(self, event_name: str, data: Any, event_id: str | None = None) -> None:
+        """Push an event to every subscriber. Drops the event for full queues."""
         item: SSEItem = (event_name, data, event_id) if event_id is not None else (event_name, data)
         for q in list(self._subs):
             try:
