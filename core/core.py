@@ -34,6 +34,8 @@ import yaml
 from aiohttp import web
 from jsonschema import ValidationError, validate as jsonschema_validate
 
+from core.supervisor import Supervisor, make_script_resolver
+
 
 ENVELOPE_TAIL_MAX = 200
 DEFAULT_ADMIN_TOKEN = "admin-dev-token"
@@ -88,6 +90,13 @@ class CoreState:
         self.envelope_tail: collections.deque = collections.deque(maxlen=ENVELOPE_TAIL_MAX)
         # Voluntarily reported UI visibility per node.
         self.node_status: dict[str, dict] = {}
+        # Process supervisor (set by make_app after manifest loads).
+        # Optional — Core works fine without it; falls back to scripts/run_mesh.sh
+        # owning processes. When attached, /v0/admin/{spawn,stop,restart,reconcile}
+        # endpoints become functional.
+        self.supervisor: Supervisor | None = None
+        # Raw manifest nodes keyed by id (for supervisor reconcile + spawn args).
+        self.manifest_nodes_raw: dict[str, dict] = {}
 
     # manifest -----------------------------------------------------------
 
@@ -114,6 +123,8 @@ class CoreState:
                 "secret": secret,
                 "surfaces": surfaces,
             }
+            # Keep the raw node dict for supervisor consumption.
+            self.manifest_nodes_raw[node["id"]] = node
         for rel in m.get("relationships", []):
             self.edges.add((rel["from"], rel["to"]))
 
@@ -121,6 +132,7 @@ class CoreState:
         # Connections, sessions, pending, tail, streams stay live across reload.
         self.nodes_decl = {}
         self.edges = set()
+        self.manifest_nodes_raw = {}
 
     def _resolve_secret(self, node_id: str, spec: str) -> str:
         if spec.startswith("env:"):
@@ -541,6 +553,101 @@ async def handle_admin_reload(request: web.Request) -> web.Response:
     })
 
 
+# ---------- supervisor admin endpoints ----------
+#
+# These four endpoints are no-ops if the Core was started without
+# --supervisor / MESH_SUPERVISOR=1. In that mode, scripts/run_mesh.sh
+# still owns process lifecycle. With supervisor enabled, Core owns it.
+
+def _require_supervisor(state: CoreState) -> web.Response | None:
+    if state.supervisor is None:
+        return web.json_response(
+            {"error": "supervisor_disabled",
+             "details": "Core started without --supervisor; "
+                        "scripts/run_mesh.sh owns processes"},
+            status=409,
+        )
+    return None
+
+
+async def handle_admin_processes(request: web.Request) -> web.Response:
+    if not _admin_authed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state: CoreState = request.app["state"]
+    if state.supervisor is None:
+        return web.json_response({"supervisor_enabled": False, "processes": []})
+    return web.json_response({
+        "supervisor_enabled": True,
+        "processes": state.supervisor.list_processes(),
+    })
+
+
+async def handle_admin_spawn(request: web.Request) -> web.Response:
+    if not _admin_authed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state: CoreState = request.app["state"]
+    err = _require_supervisor(state)
+    if err is not None:
+        return err
+    body = await request.json()
+    nid = body.get("node_id")
+    if not nid:
+        return web.json_response({"error": "missing_node_id"}, status=400)
+    manifest_node = state.manifest_nodes_raw.get(nid)
+    if manifest_node is None:
+        return web.json_response({"error": "unknown_node",
+                                  "details": f"{nid} not in current manifest"},
+                                 status=404)
+    res = await state.supervisor.spawn(nid, manifest_node)
+    return web.json_response(res)
+
+
+async def handle_admin_stop(request: web.Request) -> web.Response:
+    if not _admin_authed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state: CoreState = request.app["state"]
+    err = _require_supervisor(state)
+    if err is not None:
+        return err
+    body = await request.json()
+    nid = body.get("node_id")
+    graceful = bool(body.get("graceful", True))
+    if not nid:
+        return web.json_response({"error": "missing_node_id"}, status=400)
+    res = await state.supervisor.stop(nid, graceful=graceful)
+    return web.json_response(res)
+
+
+async def handle_admin_restart(request: web.Request) -> web.Response:
+    if not _admin_authed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state: CoreState = request.app["state"]
+    err = _require_supervisor(state)
+    if err is not None:
+        return err
+    body = await request.json()
+    nid = body.get("node_id")
+    if not nid:
+        return web.json_response({"error": "missing_node_id"}, status=400)
+    manifest_node = state.manifest_nodes_raw.get(nid)
+    if manifest_node is None:
+        return web.json_response({"error": "unknown_node"}, status=404)
+    res = await state.supervisor.restart(nid, manifest_node)
+    return web.json_response(res)
+
+
+async def handle_admin_reconcile(request: web.Request) -> web.Response:
+    """Diff manifest desired set vs. running set. Spawn missing, stop extras."""
+    if not _admin_authed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state: CoreState = request.app["state"]
+    err = _require_supervisor(state)
+    if err is not None:
+        return err
+    res = await state.supervisor.reconcile(state.manifest_nodes_raw)
+    return web.json_response(res)
+
+
 async def handle_admin_invoke(request: web.Request) -> web.Response:
     """Synthesize a signed envelope from a chosen registered node and route it."""
     if not _admin_authed(request):
@@ -610,11 +717,39 @@ async def _cors_middleware(request: web.Request, handler):
 
 # ---------- bootstrap ----------
 
-def make_app(manifest_path: str, audit_path: str | None = None) -> web.Application:
+def make_app(
+    manifest_path: str,
+    audit_path: str | None = None,
+    *,
+    enable_supervisor: bool = False,
+    supervisor_log_dir: str = ".logs",
+) -> web.Application:
     audit_path = audit_path or os.environ.get("AUDIT_LOG", "audit.log")
     app = web.Application(client_max_size=10 * 1024 * 1024, middlewares=[_cors_middleware])
     state = CoreState(manifest_path, audit_path)
     state.load_manifest()
+    if enable_supervisor:
+        repo_root = state.manifest_path.parent.parent  # manifests/foo.yaml -> repo
+        # If manifest is at repo/manifests/x.yaml, repo_root is correct.
+        # If manifest is somewhere weirder, fall back to cwd.
+        if not (repo_root / "scripts").exists():
+            repo_root = pathlib.Path.cwd()
+        resolver = make_script_resolver(str(repo_root), supervisor_log_dir)
+
+        async def emit_supervisor_event(evt: dict) -> None:
+            # Pipe into the admin SSE tail so the dashboard sees live process events.
+            payload = {"type": "supervisor", "data": evt}
+            for q in list(state._admin_streams):  # noqa: SLF001
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    pass
+
+        state.supervisor = Supervisor(
+            runner_resolver=resolver,
+            log_dir=supervisor_log_dir,
+            on_event=emit_supervisor_event,
+        )
     app["state"] = state
     app.router.add_post("/v0/register", handle_register)
     app.router.add_post("/v0/invoke", handle_invoke)
@@ -629,8 +764,19 @@ def make_app(manifest_path: str, audit_path: str | None = None) -> web.Applicati
     app.router.add_post("/v0/admin/invoke", handle_admin_invoke)
     app.router.add_post("/v0/admin/node_status", handle_admin_node_status)
     app.router.add_get("/v0/admin/ui_state", handle_admin_ui_state)
+    # Supervisor endpoints (always registered; no-op if supervisor disabled).
+    app.router.add_get("/v0/admin/processes", handle_admin_processes)
+    app.router.add_post("/v0/admin/spawn", handle_admin_spawn)
+    app.router.add_post("/v0/admin/stop", handle_admin_stop)
+    app.router.add_post("/v0/admin/restart", handle_admin_restart)
+    app.router.add_post("/v0/admin/reconcile", handle_admin_reconcile)
 
     async def on_shutdown(app: web.Application) -> None:
+        if state.supervisor is not None:
+            try:
+                await state.supervisor.shutdown_all(timeout=5.0)
+            except Exception:
+                pass
         for q in list(state._streams):  # noqa: SLF001
             try:
                 q.put_nowait({"type": "_close", "data": {}})
@@ -641,13 +787,40 @@ def make_app(manifest_path: str, audit_path: str | None = None) -> web.Applicati
     return app
 
 
-async def amain(manifest_path: str, host: str, port: int, audit_path: str | None) -> None:
-    app = make_app(manifest_path, audit_path)
+async def amain(
+    manifest_path: str,
+    host: str,
+    port: int,
+    audit_path: str | None,
+    *,
+    enable_supervisor: bool = False,
+    supervisor_log_dir: str = ".logs",
+    auto_reconcile: bool = False,
+) -> None:
+    app = make_app(
+        manifest_path,
+        audit_path,
+        enable_supervisor=enable_supervisor,
+        supervisor_log_dir=supervisor_log_dir,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
-    print(f"[core] listening on http://{host}:{port}  manifest={manifest_path}", flush=True)
+    sup_msg = " supervisor=on" if enable_supervisor else ""
+    print(f"[core] listening on http://{host}:{port}  manifest={manifest_path}{sup_msg}", flush=True)
+
+    state: CoreState = app["state"]
+
+    if enable_supervisor and auto_reconcile and state.supervisor is not None:
+        # Boot every node declared in the manifest immediately. The supervisor
+        # will restart any that crash. This makes Core a self-contained mesh
+        # bootstrap: `python -m core.core --supervisor --auto-reconcile` brings
+        # the entire mesh up and keeps it up.
+        await asyncio.sleep(0.2)  # give the listener a beat to start accepting registrations
+        result = await state.supervisor.reconcile(state.manifest_nodes_raw)
+        print(f"[core] auto-reconcile: {json.dumps(result['actions'])}", flush=True)
+
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -666,9 +839,33 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", default=os.environ.get("MESH_HOST", "127.0.0.1"))
     p.add_argument("--port", type=int, default=int(os.environ.get("MESH_PORT", "8000")))
     p.add_argument("--audit-log", default=os.environ.get("AUDIT_LOG", "audit.log"))
+    p.add_argument(
+        "--supervisor",
+        action="store_true",
+        default=os.environ.get("MESH_SUPERVISOR", "0") == "1",
+        help="Enable the in-core process supervisor (own node lifecycle).",
+    )
+    p.add_argument(
+        "--supervisor-log-dir",
+        default=os.environ.get("MESH_SUPERVISOR_LOG_DIR", ".logs"),
+    )
+    p.add_argument(
+        "--auto-reconcile",
+        action="store_true",
+        default=os.environ.get("MESH_AUTO_RECONCILE", "0") == "1",
+        help="With --supervisor: spawn all manifest nodes at startup.",
+    )
     args = p.parse_args(argv)
     try:
-        asyncio.run(amain(args.manifest, args.host, args.port, args.audit_log))
+        asyncio.run(amain(
+            args.manifest,
+            args.host,
+            args.port,
+            args.audit_log,
+            enable_supervisor=args.supervisor,
+            supervisor_log_dir=args.supervisor_log_dir,
+            auto_reconcile=args.auto_reconcile,
+        ))
     except KeyboardInterrupt:
         pass
     return 0
