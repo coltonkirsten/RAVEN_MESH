@@ -91,6 +91,13 @@ async def run_claude(
         extra_env=extra_bridge_env,
     )
 
+    # Tool isolation:
+    #   --strict-mcp-config: ignore the host's global MCP servers (imessage,
+    #       playwright, automation, etc.) — only use our bridge.
+    #   --tools "": disable Claude Code built-ins (Bash, Read, Edit, Task,
+    #       PushNotification, ScheduleWakeup, etc.) — agent should ONLY have
+    #       mesh tools. If the host needs to grant additional capabilities,
+    #       they should come through the mesh, not through claude builtins.
     args = [
         "claude",
         "-p", message,
@@ -98,6 +105,8 @@ async def run_claude(
         "--verbose",
         "--model", model,
         "--mcp-config", str(mcp_config),
+        "--strict-mcp-config",
+        "--tools", "",
         "--system-prompt", system_prompt,
         "--dangerously-skip-permissions",
     ]
