@@ -1,0 +1,102 @@
+# RAVEN Mesh — full_demo manifest.
+# Wires all four real nodes plus a dummy actor to demonstrate end-to-end flows:
+#   dummy_actor -> approval_node.inbox -> (approve) -> cron_node.set
+#   cron_node fires -> webui_node.show_message / webui_node.change_color
+#   human_node can poke at webui_node, cron_node, or invoke approval_node.inbox
+
+nodes:
+  - id: dummy_actor
+    kind: actor
+    runtime: local-process
+    identity_secret: env:DUMMY_ACTOR_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/generic_inbox.json
+
+  - id: approval_node
+    kind: approval
+    runtime: local-process
+    identity_secret: env:APPROVAL_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: request_response
+        schema: ../schemas/approval_request.json
+
+  - id: cron_node
+    kind: hybrid
+    runtime: local-process
+    identity_secret: env:CRON_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: set
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/cron_set.json
+      - name: delete
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/cron_delete.json
+      - name: list
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/cron_list.json
+
+  - id: webui_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:WEBUI_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: show_message
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/webui_show_message.json
+      - name: change_color
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/webui_change_color.json
+
+  - id: human_node
+    kind: actor
+    runtime: local-process
+    identity_secret: env:HUMAN_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/generic_inbox.json
+
+relationships:
+  # dummy_actor goes through approval to reach anything.
+  - { from: dummy_actor, to: approval_node.inbox }
+
+  # approval_node can forward to cron and webui.
+  - { from: approval_node, to: cron_node.set }
+  - { from: approval_node, to: cron_node.delete }
+  - { from: approval_node, to: cron_node.list }
+  - { from: approval_node, to: webui_node.show_message }
+  - { from: approval_node, to: webui_node.change_color }
+
+  # cron fires invocations into webui.
+  - { from: cron_node, to: webui_node.show_message }
+  - { from: cron_node, to: webui_node.change_color }
+
+  # human_node can poke at all the capabilities directly, plus the human inbox.
+  - { from: human_node, to: webui_node.show_message }
+  - { from: human_node, to: webui_node.change_color }
+  - { from: human_node, to: cron_node.set }
+  - { from: human_node, to: cron_node.delete }
+  - { from: human_node, to: cron_node.list }
+  - { from: human_node, to: approval_node.inbox }
+  - { from: human_node, to: human_node.inbox }

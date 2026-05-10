@@ -1,0 +1,23 @@
+# Runtime artefacts
+audit.log
+*.log
+.logs/
+.pids/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Cron persistence (per-host data, regenerated)
+nodes/cron_node/data/*.json
+!nodes/cron_node/data/.gitkeep

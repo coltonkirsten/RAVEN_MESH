@@ -1,0 +1,10 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "webui_change_color",
+  "type": "object",
+  "properties": {
+    "hex_color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}
+  },
+  "required": ["hex_color"],
+  "additionalProperties": true
+}
