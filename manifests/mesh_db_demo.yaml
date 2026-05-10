@@ -1,0 +1,50 @@
+# RAVEN Mesh — mesh_db demo manifest.
+#
+# mesh_db_node serves the running Core's audit.log as a queryable database.
+# Any peer with an edge to it can introspect the mesh's full envelope history
+# using the same protocol it uses for business calls.
+#
+# demo_actor drives the demo: pings mesh_db_node, then queries it.
+
+nodes:
+  - id: mesh_db_node
+    kind: capability
+    runtime: local-process
+    identity_secret: env:MESH_DB_NODE_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: query
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/mesh_db_query.json
+      - name: count
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/mesh_db_count.json
+      - name: trace
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/mesh_db_trace.json
+      - name: ping
+        type: tool
+        invocation_mode: request_response
+        schema: ../schemas/echo.json
+
+  - id: demo_actor
+    kind: actor
+    runtime: local-process
+    identity_secret: env:DEMO_ACTOR_SECRET
+    metadata:
+      location_hint: mac-mini
+    surfaces:
+      - name: inbox
+        type: inbox
+        invocation_mode: fire_and_forget
+        schema: ../schemas/generic_inbox.json
+
+relationships:
+  - { from: demo_actor, to: mesh_db_node.query }
+  - { from: demo_actor, to: mesh_db_node.count }
+  - { from: demo_actor, to: mesh_db_node.trace }
+  - { from: demo_actor, to: mesh_db_node.ping }
