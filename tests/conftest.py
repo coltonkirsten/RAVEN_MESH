@@ -14,6 +14,12 @@ from aiohttp import web
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+TEST_ADMIN_TOKEN = "test-admin-token-do-not-ship"
+# Core refuses to boot without an explicit, non-default ADMIN_TOKEN. Set it
+# at conftest load time so every test fixture (including those that build
+# their own Core via make_app) inherits a valid token.
+os.environ.setdefault("ADMIN_TOKEN", TEST_ADMIN_TOKEN)
+
 from core.core import make_app  # noqa: E402
 
 

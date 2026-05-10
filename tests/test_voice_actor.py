@@ -44,6 +44,7 @@ def _set_secrets() -> None:
     for nid in ("voice_actor", "nexus_agent", "webui_node", "human_node"):
         var = f"{nid.upper()}_SECRET"
         os.environ.setdefault(var, hashlib.sha256(f"mesh:{nid}:test".encode()).hexdigest())
+    os.environ.setdefault("ADMIN_TOKEN", "test-admin-token-do-not-ship")
     # Make sure tests run with no API key — confirms graceful degradation.
     os.environ.pop("OPENAI_API_KEY", None)
 
@@ -125,7 +126,7 @@ async def test_node_registers_with_all_surfaces(voice_actor_node):
 async def test_admin_state_exposes_voice_schemas(voice_core, voice_actor_node):
     async with aiohttp.ClientSession() as s:
         async with s.get(f"{voice_core['url']}/v0/admin/state",
-                         headers={"X-Admin-Token": "admin-dev-token"}) as r:
+                         headers={"X-Admin-Token": os.environ["ADMIN_TOKEN"]}) as r:
             assert r.status == 200
             full = await r.json()
     voice = next(n for n in full["nodes"] if n["id"] == "voice_actor")

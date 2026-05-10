@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 from core.core import make_app  # noqa: E402
 
-ADMIN_TOKEN = "admin-dev-token"
+ADMIN_TOKEN = "test-admin-token-do-not-ship"
 HEADERS = {"X-Admin-Token": ADMIN_TOKEN}
 
 

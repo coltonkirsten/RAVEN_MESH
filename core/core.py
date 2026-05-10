@@ -27,6 +27,7 @@ import os
 import pathlib
 import signal
 import sys
+import time
 import uuid
 from typing import Any
 
@@ -38,7 +39,9 @@ from core.supervisor import Supervisor, make_script_resolver
 
 
 ENVELOPE_TAIL_MAX = 200
-DEFAULT_ADMIN_TOKEN = "admin-dev-token"
+NODE_QUEUE_MAX = 1024
+LEGACY_ADMIN_TOKEN = "admin-dev-token"
+ADMIN_RATE_BUCKET_MAX = 4096
 
 
 # ---------- helpers ----------
@@ -64,12 +67,37 @@ def verify(obj: dict, secret: str) -> bool:
 
 
 def admin_token() -> str:
-    return os.environ.get("ADMIN_TOKEN", DEFAULT_ADMIN_TOKEN)
+    """Return the configured admin token, refusing unset/legacy defaults.
+
+    Raises ``RuntimeError`` if ``ADMIN_TOKEN`` is missing or equals the
+    historical ``"admin-dev-token"`` placeholder. Failing loud at boot beats
+    silently shipping a guessable fallback.
+    """
+    tok = os.environ.get("ADMIN_TOKEN")
+    if not tok:
+        raise RuntimeError(
+            "ADMIN_TOKEN must be set in the environment before Core starts; "
+            "there is no built-in default."
+        )
+    if tok == LEGACY_ADMIN_TOKEN:
+        raise RuntimeError(
+            "ADMIN_TOKEN is set to the legacy placeholder 'admin-dev-token'; "
+            "rotate to a non-default value before starting Core."
+        )
+    return tok
 
 
 def _admin_authed(request: web.Request) -> bool:
-    token = request.headers.get("X-Admin-Token") or request.query.get("admin_token")
-    return token == admin_token()
+    # Header-only. Query-string secrets land in shell history, browser
+    # history, server logs and Referer headers — refuse them outright.
+    token = request.headers.get("X-Admin-Token")
+    if not token:
+        return False
+    try:
+        expected = admin_token()
+    except RuntimeError:
+        return False
+    return hmac.compare_digest(token, expected)
 
 
 # ---------- state ----------
@@ -206,7 +234,7 @@ async def handle_register(request: web.Request) -> web.Response:
         except asyncio.QueueFull:
             pass
     session_id = str(uuid.uuid4())
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=NODE_QUEUE_MAX)
     state.connections[node_id] = {
         "session_id": session_id,
         "queue": queue,
@@ -295,16 +323,37 @@ async def _route_invocation(state: CoreState, env: dict,
         state.emit_envelope(env=env, direction="in", signature_valid=True,
                             route_status="denied_node_unreachable")
         return 503, {"error": "denied_node_unreachable", "node": target_node}
-    await state.audit(type="invocation", from_node=from_node, to_surface=to,
-                      decision="routed", correlation_id=correlation_id, details={"msg_id": msg_id})
-    state.emit_envelope(env=env, direction="in", signature_valid=True, route_status="routed")
     deliver_event = {"type": "deliver", "data": env}
+    target_queue: asyncio.Queue = target_conn["queue"]
     if surface["invocation_mode"] == "fire_and_forget":
-        await target_conn["queue"].put(deliver_event)
+        try:
+            target_queue.put_nowait(deliver_event)
+        except asyncio.QueueFull:
+            await state.audit(type="invocation", from_node=from_node, to_surface=to,
+                              decision="denied_queue_full", correlation_id=correlation_id,
+                              details={"target_node": target_node, "queue_max": NODE_QUEUE_MAX})
+            state.emit_envelope(env=env, direction="in", signature_valid=True,
+                                route_status="denied_queue_full")
+            return 503, {"error": "denied_queue_full", "node": target_node}
+        await state.audit(type="invocation", from_node=from_node, to_surface=to,
+                          decision="routed", correlation_id=correlation_id, details={"msg_id": msg_id})
+        state.emit_envelope(env=env, direction="in", signature_valid=True, route_status="routed")
         return 202, {"id": msg_id, "status": "accepted"}
     fut: asyncio.Future = asyncio.get_event_loop().create_future()
     state.pending[msg_id] = {"future": fut, "target_node": target_node, "from_node": from_node}
-    await target_conn["queue"].put(deliver_event)
+    try:
+        target_queue.put_nowait(deliver_event)
+    except asyncio.QueueFull:
+        state.pending.pop(msg_id, None)
+        await state.audit(type="invocation", from_node=from_node, to_surface=to,
+                          decision="denied_queue_full", correlation_id=correlation_id,
+                          details={"target_node": target_node, "queue_max": NODE_QUEUE_MAX})
+        state.emit_envelope(env=env, direction="in", signature_valid=True,
+                            route_status="denied_queue_full")
+        return 503, {"error": "denied_queue_full", "node": target_node}
+    await state.audit(type="invocation", from_node=from_node, to_surface=to,
+                      decision="routed", correlation_id=correlation_id, details={"msg_id": msg_id})
+    state.emit_envelope(env=env, direction="in", signature_valid=True, route_status="routed")
     timeout = float(os.environ.get("MESH_INVOKE_TIMEOUT", "30"))
     try:
         result = await asyncio.wait_for(fut, timeout=timeout)
@@ -648,6 +697,36 @@ async def handle_admin_reconcile(request: web.Request) -> web.Response:
     return web.json_response(res)
 
 
+async def handle_admin_drain(request: web.Request) -> web.Response:
+    """Stop accepting new work for a child, wait for in-flight to finish, then SIGTERM."""
+    if not _admin_authed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state: CoreState = request.app["state"]
+    err = _require_supervisor(state)
+    if err is not None:
+        return err
+    body = await request.json()
+    nid = body.get("node_id")
+    timeout = float(body.get("timeout", 30.0))
+    if not nid:
+        return web.json_response({"error": "missing_node_id"}, status=400)
+    res = await state.supervisor.drain(nid, timeout=timeout)
+    return web.json_response(res)
+
+
+async def handle_admin_metrics(request: web.Request) -> web.Response:
+    """Per-child + aggregate supervisor metrics (restart counts, uptime, in-flight)."""
+    if not _admin_authed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state: CoreState = request.app["state"]
+    if state.supervisor is None:
+        return web.json_response({"supervisor_enabled": False, "metrics": None})
+    return web.json_response({
+        "supervisor_enabled": True,
+        "metrics": state.supervisor.metrics(),
+    })
+
+
 async def handle_admin_invoke(request: web.Request) -> web.Response:
     """Synthesize a signed envelope from a chosen registered node and route it."""
     if not _admin_authed(request):
@@ -715,6 +794,89 @@ async def _cors_middleware(request: web.Request, handler):
     return response
 
 
+class _AdminRateLimiter:
+    """Token-bucket rate limiter scoped to ``/v0/admin/*``.
+
+    Generic protocol-layer protection: any caller of the admin namespace —
+    operator script, dashboard, malicious neighbour — sees the same bucket.
+    Configured via ``MESH_ADMIN_RATE_LIMIT`` (per-minute fill rate,
+    default 60) and ``MESH_ADMIN_RATE_BURST`` (bucket capacity / burst
+    allowance, default 20). Setting the rate to ``0`` disables limiting.
+    """
+
+    def __init__(self, rate_per_min: float, burst: float):
+        self.refill_per_sec = rate_per_min / 60.0 if rate_per_min > 0 else 0.0
+        self.capacity = float(burst) if burst > 0 else 0.0
+        self.enabled = self.refill_per_sec > 0 and self.capacity > 0
+        self._buckets: dict[str, tuple[float, float]] = {}
+        self._lock = asyncio.Lock()
+
+    async def consume(self, key: str) -> bool:
+        if not self.enabled:
+            return True
+        now = time.monotonic()
+        async with self._lock:
+            tokens, last = self._buckets.get(key, (self.capacity, now))
+            tokens = min(self.capacity, tokens + (now - last) * self.refill_per_sec)
+            if tokens < 1.0:
+                self._buckets[key] = (tokens, now)
+                return False
+            tokens -= 1.0
+            if len(self._buckets) > ADMIN_RATE_BUCKET_MAX:
+                self._evict_idle(now)
+            self._buckets[key] = (tokens, now)
+            return True
+
+    def _evict_idle(self, now: float) -> None:
+        # Drop entries that have refilled to capacity — equivalent to "no
+        # state worth keeping". Keeps the dict bounded even under spray.
+        idle_after = self.capacity / self.refill_per_sec if self.refill_per_sec else 0
+        cutoff = now - idle_after
+        for k in [k for k, (_, last) in self._buckets.items() if last < cutoff]:
+            self._buckets.pop(k, None)
+
+
+def _build_admin_rate_limiter() -> _AdminRateLimiter:
+    try:
+        rate = float(os.environ.get("MESH_ADMIN_RATE_LIMIT", "60"))
+    except ValueError:
+        rate = 60.0
+    try:
+        burst = float(os.environ.get("MESH_ADMIN_RATE_BURST", "20"))
+    except ValueError:
+        burst = 20.0
+    return _AdminRateLimiter(rate, burst)
+
+
+def _admin_rate_key(request: web.Request) -> str:
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",", 1)[0].strip()
+    peer = request.transport.get_extra_info("peername") if request.transport else None
+    if peer:
+        return peer[0]
+    return "unknown"
+
+
+@web.middleware
+async def _admin_rate_limit_middleware(request: web.Request, handler):
+    if not request.path.startswith("/v0/admin"):
+        return await handler(request)
+    if request.method == "OPTIONS":
+        return await handler(request)
+    limiter: _AdminRateLimiter | None = request.app.get("admin_rate_limiter")
+    if limiter is None or not limiter.enabled:
+        return await handler(request)
+    key = _admin_rate_key(request)
+    if not await limiter.consume(key):
+        return web.json_response(
+            {"error": "rate_limited", "scope": "admin"},
+            status=429,
+            headers={"Retry-After": "1"},
+        )
+    return await handler(request)
+
+
 # ---------- bootstrap ----------
 
 def make_app(
@@ -725,7 +887,14 @@ def make_app(
     supervisor_log_dir: str = ".logs",
 ) -> web.Application:
     audit_path = audit_path or os.environ.get("AUDIT_LOG", "audit.log")
-    app = web.Application(client_max_size=10 * 1024 * 1024, middlewares=[_cors_middleware])
+    # Validate the admin token at boot — refusing to start with an unset or
+    # legacy-default token. The token is then resolved per-request.
+    admin_token()
+    app = web.Application(
+        client_max_size=10 * 1024 * 1024,
+        middlewares=[_cors_middleware, _admin_rate_limit_middleware],
+    )
+    app["admin_rate_limiter"] = _build_admin_rate_limiter()
     state = CoreState(manifest_path, audit_path)
     state.load_manifest()
     if enable_supervisor:
@@ -770,6 +939,8 @@ def make_app(
     app.router.add_post("/v0/admin/stop", handle_admin_stop)
     app.router.add_post("/v0/admin/restart", handle_admin_restart)
     app.router.add_post("/v0/admin/reconcile", handle_admin_reconcile)
+    app.router.add_post("/v0/admin/drain", handle_admin_drain)
+    app.router.add_get("/v0/admin/metrics", handle_admin_metrics)
 
     async def on_shutdown(app: web.Application) -> None:
         if state.supervisor is not None:
