@@ -239,7 +239,7 @@ async def test_step_10_external_language_node(core_server):
 
     async with aiohttp.ClientSession() as s:
         # Manual register.
-        body = {"node_id": "external_node", "timestamp": "now"}
+        body = {"node_id": "external_node", "timestamp": now_iso()}
         body["signature"] = sign(body, ext_secret)
         async with s.post(f"{url}/v0/register", json=body) as r:
             assert r.status == 200

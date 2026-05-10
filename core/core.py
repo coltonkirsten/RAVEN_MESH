@@ -299,6 +299,26 @@ class CoreState:
             self._replay_nonces.popitem(last=False)
         return True, None
 
+    def check_timestamp_only(self, env: dict) -> tuple[bool, float | None]:
+        """Validate envelope freshness without touching the nonce LRU.
+
+        Returns ``(ok, drift_s)``. ``drift_s`` is the absolute drift in
+        seconds when the timestamp parses, or ``None`` when missing/malformed.
+        Use this on endpoints whose envelope schema lacks a unique id field;
+        full coverage requires the SDK to add an id and switch to
+        ``check_replay``.
+        """
+        ts = env.get("timestamp")
+        parsed = _parse_iso_ts(ts)
+        if parsed is None:
+            return False, None
+        drift = abs(
+            (_dt.datetime.now(_dt.timezone.utc) - parsed).total_seconds()
+        )
+        if drift > self.replay_window_s:
+            return False, drift
+        return True, drift
+
     # audit + tap --------------------------------------------------------
 
     async def audit(self, **fields: Any) -> None:
@@ -345,6 +365,21 @@ async def handle_register(request: web.Request) -> web.Response:
         return web.json_response({"error": "unknown_node", "node_id": node_id}, status=404)
     if not verify(body, decl["secret"]):
         return web.json_response({"error": "bad_signature"}, status=401)
+    # register envelopes lack a unique id; nonce LRU would require an SDK change.
+    # Timestamp-only narrows the replay window to MESH_REPLAY_WINDOW_S; full
+    # coverage requires SDK envelope-id field (deferred to next SDK bump).
+    ok, drift = state.check_timestamp_only(body)
+    if not ok:
+        _log.info(
+            "[replay] register rejected: timestamp drift %ss exceeds window %ss for node_id=%s",
+            f"{drift:.3f}" if drift is not None else "missing",
+            state.replay_window_s,
+            node_id,
+        )
+        return web.json_response(
+            {"error": "stale_register", "reason": "timestamp outside replay window"},
+            status=401,
+        )
     old = state.connections.get(node_id)
     if old:
         state.sessions.pop(old["session_id"], None)
