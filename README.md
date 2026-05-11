@@ -14,24 +14,12 @@ cd RAVEN_MESH
 
 pip install aiohttp pydantic pyyaml jsonschema croniter structlog pytest pytest-asyncio
 
-python3 -m pytest                    # all 19 tests pass
+python3 -m pytest                    # protocol test suite
 scripts/run_demo.sh start            # protocol-validation demo (Core + tasks + approval)
-scripts/run_full_demo.sh start       # all four real nodes wired together
 ```
 
-Once `run_full_demo.sh` is up:
-
-| dashboard | url |
-| --------- | --- |
-| webui_node    | http://127.0.0.1:8801 |
-| human_node    | http://127.0.0.1:8802 |
-| approval_node | http://127.0.0.1:8803 |
-| Core health   | http://127.0.0.1:8000/v0/healthz |
-| Core registry | http://127.0.0.1:8000/v0/introspect |
-
-Try: open http://127.0.0.1:8801 (webui), then in the human dashboard at http://127.0.0.1:8802 pick `webui_node.show_message` and send `{"text": "hello from human"}`. The webui browser updates live.
-
-Stop everything: `scripts/run_full_demo.sh stop`.
+Core health: http://127.0.0.1:8000/v0/healthz
+Core registry: http://127.0.0.1:8000/v0/introspect
 
 ## Repo tour
 
@@ -47,7 +35,6 @@ nodes/
 schemas/       JSON Schemas referenced by manifests
 manifests/
   demo.yaml         protocol-validation demo (drives tests/)
-  full_demo.yaml    all four real nodes
 scripts/       bash wrappers; source scripts/_env.sh for deterministic dev secrets
 tests/         pytest suite — all ten PRD §7 flows pass
 docs/
