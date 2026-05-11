@@ -70,3 +70,30 @@ relationships:
 
   - from: voice_actor
     to: external_node.ping
+
+  # voice_actor doubles as the "operator" node in tests. Edges to the built-in
+  # `core` capability (SPEC §5) let the protocol test-suite drive every core.*
+  # surface end-to-end via /v0/invoke. Production manifests should grant these
+  # edges only to nodes that actually need to operate the mesh.
+  - from: voice_actor
+    to: core.state
+  - from: voice_actor
+    to: core.processes
+  - from: voice_actor
+    to: core.metrics
+  - from: voice_actor
+    to: core.audit_query
+  - from: voice_actor
+    to: core.set_manifest
+  - from: voice_actor
+    to: core.reload_manifest
+  - from: voice_actor
+    to: core.spawn
+  - from: voice_actor
+    to: core.stop
+  - from: voice_actor
+    to: core.restart
+  - from: voice_actor
+    to: core.reconcile
+  - from: voice_actor
+    to: core.drain

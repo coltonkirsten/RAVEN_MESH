@@ -42,6 +42,16 @@ from jsonschema import Draft7Validator
 
 _RESERVED_NODE_IDS: frozenset[str] = frozenset({"core"})
 
+# SPEC §5.1: the built-in ``core`` node is always implicitly declared, with
+# this fixed surface set. Manifests may reference ``core.<surface>`` as a
+# relationship target without redeclaring the node — and they MUST NOT
+# redeclare it (see ``_RESERVED_NODE_IDS`` above).
+_CORE_BUILTIN_SURFACES: frozenset[str] = frozenset({
+    "state", "processes", "metrics", "audit_query",
+    "set_manifest", "reload_manifest",
+    "spawn", "stop", "restart", "reconcile", "drain",
+})
+
 # The JSON Schema lives next to the other schemas at <repo>/schemas/manifest.json.
 _SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / "schemas" / "manifest.json"
 
@@ -197,6 +207,16 @@ def validate_manifest(
             # Already reported by the schema check.
             continue
         target_node, _, surface_name = rto.partition(".")
+        # SPEC §5.1: 'core' is always present implicitly; resolve against the
+        # built-in surface set rather than `declared_ids`.
+        if target_node == "core":
+            if surface_name not in _CORE_BUILTIN_SURFACES:
+                errors.append(
+                    f"relationships[{ridx}]: 'core' has no surface "
+                    f"'{surface_name}' (in '{rto}'); valid: "
+                    f"{sorted(_CORE_BUILTIN_SURFACES)}"
+                )
+            continue
         if target_node not in declared_ids:
             errors.append(
                 f"relationships[{ridx}]: 'to' references undeclared node "

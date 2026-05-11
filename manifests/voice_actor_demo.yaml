@@ -127,3 +127,7 @@ relationships:
   - { from: human_node, to: nexus_agent.inbox }
   - { from: human_node, to: webui_node.show_message }
   - { from: human_node, to: webui_node.change_color }
+
+  # voice_actor needs core.state to introspect schemas (see test_voice_actor.py).
+  # Production manifests grant this only to nodes that act as operators.
+  - { from: voice_actor, to: core.state }
