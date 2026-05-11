@@ -1,7 +1,0 @@
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "demo_actor_inbox",
-  "description": "Permissive inbox surface for the demo actor. Not actually invoked in the demo.",
-  "type": "object",
-  "additionalProperties": true
-}
