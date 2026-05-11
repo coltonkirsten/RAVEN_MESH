@@ -1,16 +1,20 @@
 """RAVEN Mesh — single-process Python Core.
 
-Implements the v0 wire protocol (PRD §5). Loads a manifest, listens on HTTP,
-verifies HMAC signatures, validates payloads against per-surface JSON Schemas,
-and routes messages between connected nodes via SSE delivery + POST responses.
-Audit log is JSON-per-line.
+Implements the v0 wire protocol (`docs/SPEC.md`). Loads a manifest, listens
+on HTTP, verifies HMAC signatures, validates payloads against per-surface
+JSON Schemas, and routes messages between connected nodes via SSE delivery
++ POST responses. Audit log is JSON-per-line.
 
-Admin surfaces (see PRD §8):
-    GET  /v0/admin/state         — full snapshot of nodes, manifest, edges, tail
-    GET  /v0/admin/stream        — SSE tap of every envelope flowing through Core
-    POST /v0/admin/manifest      — write+validate a new manifest YAML to disk
-    POST /v0/admin/reload        — re-read the manifest currently on disk
-    POST /v0/admin/invoke        — synthesize a signed envelope from a chosen node
+Control surfaces are exposed as the reserved built-in `core` node (SPEC §5).
+Envelopes addressed to `core.<surface>` are dispatched in-process instead of
+pushed to an SSE stream, but otherwise traverse the normal /v0/invoke path:
+HMAC, replay window, allow-edge, schema validation, and audit all apply.
+
+Out-of-band operator endpoints (SPEC §4.5):
+    GET /v0/admin/stream     — raw SSE tap of every routed envelope
+    GET /v0/admin/metrics    — Prometheus exposition of Core counters
+Both are bearer-token gated by `ADMIN_TOKEN` and are NOT part of mesh
+traffic. No other /v0/admin/* endpoints exist.
 """
 from __future__ import annotations
 
@@ -55,7 +59,41 @@ ADMIN_RATE_BUCKET_MAX = 4096
 # 300s window.
 REPLAY_NONCE_LRU_MAX = 16384
 
+# SPEC §5: the reserved built-in node.
+CORE_NODE_ID = "core"
+CORE_SURFACE_NAMES: tuple[str, ...] = (
+    "state", "processes", "metrics", "audit_query",
+    "set_manifest", "reload_manifest",
+    "spawn", "stop", "restart", "reconcile", "drain",
+)
+_CORE_SCHEMAS_DIR = pathlib.Path(__file__).resolve().parent.parent / "schemas" / "core"
+# Cap on lines read from audit.log per core.audit_query call. Keeps the
+# tail-and-filter scan bounded; see notes/2026-05-10_spec_questions.md §4.
+AUDIT_QUERY_SCAN_LIMIT = 100_000
+AUDIT_QUERY_DEFAULT_LAST_N = 100
+AUDIT_QUERY_MAX_LAST_N = 1000
+
 _log = logging.getLogger("mesh.core")
+
+
+class _PendingCancelled(Exception):
+    """Pending invocation cancelled (e.g. by manifest reload). Carries the
+    HTTP status + body that ``_route_invocation`` should return to the caller.
+    """
+
+    def __init__(self, status: int, body: dict):
+        self.status = status
+        self.body = body
+        super().__init__(body.get("error", "pending_cancelled"))
+
+
+class _CoreSurfaceError(Exception):
+    """Raised by a core.* handler to surface as an ``error`` envelope."""
+
+    def __init__(self, reason: str, **details: Any):
+        self.reason = reason
+        self.details = details
+        super().__init__(reason)
 
 
 def _load_replay_window_s() -> int:
@@ -222,11 +260,14 @@ class CoreState:
         self.replay_window_s: int = self.config.security.replay_window_s
         # Process supervisor (set by make_app after manifest loads).
         # Optional — Core works fine without it; falls back to scripts/run_mesh.sh
-        # owning processes. When attached, /v0/admin/{spawn,stop,restart,reconcile}
-        # endpoints become functional.
+        # owning processes. When attached, core.{spawn,stop,restart,reconcile,drain}
+        # become functional surfaces.
         self.supervisor: Supervisor | None = None
         # Raw manifest nodes keyed by id (for supervisor reconcile + spawn args).
         self.manifest_nodes_raw: dict[str, dict] = {}
+        # SPEC §5.1: 'core' is always present, with secret from MESH_CORE_SECRET.
+        self._core_secret: str = self._load_core_secret()
+        self._install_core_node()
 
     # manifest -----------------------------------------------------------
 
@@ -259,12 +300,111 @@ class CoreState:
             self.manifest_nodes_raw[node["id"]] = node
         for rel in m.get("relationships", []):
             self.edges.add((rel["from"], rel["to"]))
+        # Re-install the built-in 'core' node — it survives every manifest reload
+        # whether or not the YAML names it. SPEC §5.1.
+        self._install_core_node()
+
+    async def reload_manifest_runtime(self, *, source: str,
+                                      validate: bool = True) -> dict:
+        """Reload the manifest and apply SPEC §5.4 session semantics.
+
+        - Sessions for nodes still present in the new manifest stay open.
+        - Sessions for nodes that have disappeared are closed.
+        - Pending invocations whose ``(from, to)`` edge no longer exists are
+          failed with ``denied_no_relationship`` (audited).
+        - Every still-connected node gets a ``manifest_reloaded`` SSE event.
+        """
+        pre_node_ids = set(self.nodes_decl.keys())
+        pre_edges = set(self.edges)
+        self.load_manifest(source=source, validate=validate)
+        post_node_ids = set(self.nodes_decl.keys())
+        post_edges = self.edges
+
+        closed_sessions: list[str] = []
+        for nid in pre_node_ids - post_node_ids:
+            conn = self.connections.pop(nid, None)
+            if conn is None:
+                continue
+            self.sessions.pop(conn["session_id"], None)
+            try:
+                conn["queue"].put_nowait({"type": "_close", "data": {}})
+            except asyncio.QueueFull:
+                pass
+            closed_sessions.append(nid)
+
+        failed_inflight: list[str] = []
+        for msg_id, entry in list(self.pending.items()):
+            from_node = entry.get("from_node")
+            to_surface = entry.get("to_surface")
+            if (from_node, to_surface) in post_edges:
+                continue
+            fut: asyncio.Future = entry["future"]
+            if not fut.done():
+                fut.set_exception(_PendingCancelled(403, {
+                    "error": "denied_no_relationship",
+                    "from": from_node,
+                    "to": to_surface,
+                    "reason": "manifest_reloaded",
+                }))
+            self.pending.pop(msg_id, None)
+            failed_inflight.append(msg_id)
+            await self.audit(
+                type="invocation", from_node=from_node, to_surface=to_surface,
+                decision="denied_no_relationship", correlation_id=msg_id,
+                details={"reason": "manifest_reloaded"},
+            )
+
+        edges_changed = pre_edges != post_edges
+        payload = {"timestamp": now_iso(), "edges_changed": edges_changed}
+        for conn in self.connections.values():
+            try:
+                conn["queue"].put_nowait({"type": "manifest_reloaded", "data": payload})
+            except asyncio.QueueFull:
+                pass
+        return {
+            "closed_sessions": closed_sessions,
+            "failed_inflight": failed_inflight,
+            "edges_changed": edges_changed,
+        }
 
     def _reset_manifest_state(self) -> None:
         # Connections, sessions, pending, tail, streams stay live across reload.
         self.nodes_decl = {}
         self.edges = set()
         self.manifest_nodes_raw = {}
+
+    def _load_core_secret(self) -> str:
+        """Read MESH_CORE_SECRET (SPEC §5.1). Autogenerate if unset, for dev/tests."""
+        val = os.environ.get("MESH_CORE_SECRET")
+        if val:
+            return val
+        val = hashlib.sha256(b"mesh:core:autogen").hexdigest()
+        os.environ["MESH_CORE_SECRET"] = val
+        return val
+
+    def _install_core_node(self) -> None:
+        """Add the reserved 'core' node and its 11 surfaces to ``nodes_decl``.
+
+        Idempotent — safe to call after every manifest reload. SPEC §5.1
+        requires `core` to be listed in /v0/introspect snapshots whether or
+        not the manifest YAML names it.
+        """
+        surfaces: dict[str, dict] = {}
+        for surface_name in CORE_SURFACE_NAMES:
+            schema_path = _CORE_SCHEMAS_DIR / f"{surface_name}.json"
+            schema = json.loads(schema_path.read_text())
+            surfaces[surface_name] = {
+                "type": "tool",
+                "schema": schema,
+                "invocation_mode": "request_response",
+            }
+        self.nodes_decl[CORE_NODE_ID] = {
+            "kind": "capability",
+            "runtime": "in-process",
+            "metadata": {"builtin": True},
+            "secret": self._core_secret,
+            "surfaces": surfaces,
+        }
 
     def _resolve_secret(self, node_id: str, spec: str) -> str:
         if spec.startswith("env:"):
@@ -359,6 +499,284 @@ class CoreState:
                 pass
 
 
+# ---------- core.* in-process handlers ----------
+#
+# Dispatched by ``_route_invocation`` whenever ``to`` resolves to the reserved
+# ``core`` node. Handlers receive ``(state, env, payload)`` and return a JSON-
+# serialisable dict; raising ``_CoreSurfaceError`` produces an ``error``
+# envelope. ``_dispatch_core_surface`` wraps the result in a signed envelope.
+
+def _need_supervisor(state: "CoreState") -> None:
+    if state.supervisor is None:
+        raise _CoreSurfaceError(
+            "supervisor_disabled",
+            details=("Core started without --supervisor; "
+                     "scripts/run_mesh.sh owns processes"),
+        )
+
+
+def _nodes_state_view(state: "CoreState") -> list[dict]:
+    out = []
+    for nid, decl in state.nodes_decl.items():
+        out.append({
+            "id": nid,
+            "kind": decl["kind"],
+            "runtime": decl["runtime"],
+            "metadata": decl["metadata"],
+            "connected": nid in state.connections,
+            "surfaces": [
+                {
+                    "name": n,
+                    "type": s["type"],
+                    "invocation_mode": s["invocation_mode"],
+                    "schema": s["schema"],
+                }
+                for n, s in decl["surfaces"].items()
+            ],
+        })
+    return out
+
+
+async def _core_state(state: "CoreState", env: dict, payload: dict) -> dict:
+    return {
+        "manifest_path": str(state.manifest_path),
+        "audit_path": str(state.audit_path),
+        "nodes": _nodes_state_view(state),
+        "relationships": [{"from": f, "to": t} for f, t in sorted(state.edges)],
+        "envelope_tail": list(state.envelope_tail),
+    }
+
+
+async def _core_processes(state: "CoreState", env: dict, payload: dict) -> dict:
+    if state.supervisor is None:
+        return {"supervisor_enabled": False, "processes": []}
+    return {
+        "supervisor_enabled": True,
+        "processes": state.supervisor.list_processes(),
+    }
+
+
+async def _core_metrics(state: "CoreState", env: dict, payload: dict) -> dict:
+    metrics = {
+        "nodes_declared": len(state.nodes_decl),
+        "nodes_connected": len(state.connections),
+        "edges": len(state.edges),
+        "pending": len(state.pending),
+        "replay_nonce_lru": len(state._replay_nonces),
+        "envelope_tail": len(state.envelope_tail),
+        "admin_streams": len(state._admin_streams),
+        "node_streams": len(state._streams),
+        "supervisor": state.supervisor.metrics() if state.supervisor else None,
+    }
+    return metrics
+
+
+async def _core_spawn(state: "CoreState", env: dict, payload: dict) -> dict:
+    _need_supervisor(state)
+    nid = payload["node_id"]
+    manifest_node = state.manifest_nodes_raw.get(nid)
+    if manifest_node is None:
+        raise _CoreSurfaceError("unknown_node", node_id=nid)
+    return await state.supervisor.spawn(nid, manifest_node)
+
+
+async def _core_stop(state: "CoreState", env: dict, payload: dict) -> dict:
+    _need_supervisor(state)
+    nid = payload["node_id"]
+    graceful = bool(payload.get("graceful", True))
+    return await state.supervisor.stop(nid, graceful=graceful)
+
+
+async def _core_restart(state: "CoreState", env: dict, payload: dict) -> dict:
+    _need_supervisor(state)
+    nid = payload["node_id"]
+    manifest_node = state.manifest_nodes_raw.get(nid)
+    if manifest_node is None:
+        raise _CoreSurfaceError("unknown_node", node_id=nid)
+    return await state.supervisor.restart(nid, manifest_node)
+
+
+async def _core_reconcile(state: "CoreState", env: dict, payload: dict) -> dict:
+    _need_supervisor(state)
+    return await state.supervisor.reconcile(state.manifest_nodes_raw)
+
+
+async def _core_drain(state: "CoreState", env: dict, payload: dict) -> dict:
+    _need_supervisor(state)
+    nid = payload["node_id"]
+    timeout = float(payload.get("timeout", 30.0))
+    return await state.supervisor.drain(nid, timeout=timeout)
+
+
+async def _core_set_manifest(state: "CoreState", env: dict, payload: dict) -> dict:
+    raw = payload["yaml"]
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        raise _CoreSurfaceError("bad_yaml", details=str(e))
+    if not isinstance(parsed, dict) or "nodes" not in parsed:
+        raise _CoreSurfaceError("manifest_missing_nodes")
+    _run_manifest_validator(
+        parsed, state.manifest_path.parent, source="core.set_manifest",
+    )
+    backup = state.manifest_path.with_suffix(state.manifest_path.suffix + ".bak")
+    if state.manifest_path.exists():
+        backup.write_text(state.manifest_path.read_text())
+    state.manifest_path.write_text(raw)
+    try:
+        result = await state.reload_manifest_runtime(
+            source="core.set_manifest", validate=False,
+        )
+    except Exception as e:
+        if backup.exists():
+            state.manifest_path.write_text(backup.read_text())
+            await state.reload_manifest_runtime(
+                source="core.set_manifest:rollback", validate=False,
+            )
+        raise _CoreSurfaceError("load_failed", details=str(e))
+    return {
+        "ok": True,
+        "manifest_path": str(state.manifest_path),
+        "nodes_declared": len(state.nodes_decl),
+        "edges": len(state.edges),
+        **result,
+    }
+
+
+async def _core_reload_manifest(state: "CoreState", env: dict, payload: dict) -> dict:
+    try:
+        result = await state.reload_manifest_runtime(source="core.reload_manifest")
+    except Exception as e:
+        raise _CoreSurfaceError("load_failed", details=str(e))
+    return {
+        "ok": True,
+        "nodes_declared": len(state.nodes_decl),
+        "edges": len(state.edges),
+        **result,
+    }
+
+
+def _read_audit_tail_lines(path: pathlib.Path, limit: int) -> list[bytes]:
+    """Read up to ``limit`` lines from the end of ``path`` without slurping
+    the whole file. Reads in 64 KiB blocks from the tail until the requested
+    line count is reached or the file is exhausted.
+    """
+    if not path.exists():
+        return []
+    block = 64 * 1024
+    data = b""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        pos = f.tell()
+        while pos > 0:
+            read = min(block, pos)
+            pos -= read
+            f.seek(pos)
+            data = f.read(read) + data
+            if data.count(b"\n") > limit:
+                break
+    lines = data.splitlines()
+    return lines[-limit:] if len(lines) > limit else lines
+
+
+async def _core_audit_query(state: "CoreState", env: dict, payload: dict) -> dict:
+    """Tail-and-filter on audit.log per SPEC §5.3.
+
+    Filter fields are conjunctive AND. Returns up to ``last_n`` matches in
+    most-recent-first order. Bounded by ``AUDIT_QUERY_SCAN_LIMIT`` so a
+    single call cannot read an unbounded number of lines.
+    """
+    since = payload.get("since")
+    until = payload.get("until")
+    from_node = payload.get("from_node")
+    to_surface = payload.get("to_surface")
+    decision = payload.get("decision")
+    correlation_id = payload.get("correlation_id")
+    last_n = int(payload.get("last_n", AUDIT_QUERY_DEFAULT_LAST_N))
+    last_n = max(1, min(AUDIT_QUERY_MAX_LAST_N, last_n))
+
+    since_dt = _parse_iso_ts(since) if since else None
+    until_dt = _parse_iso_ts(until) if until else None
+    if since and since_dt is None:
+        raise _CoreSurfaceError("bad_since", value=since)
+    if until and until_dt is None:
+        raise _CoreSurfaceError("bad_until", value=until)
+
+    raw_lines = _read_audit_tail_lines(state.audit_path, AUDIT_QUERY_SCAN_LIMIT)
+    truncated = len(raw_lines) >= AUDIT_QUERY_SCAN_LIMIT
+    matches: list[dict] = []
+    scanned = 0
+    for raw in reversed(raw_lines):
+        scanned += 1
+        try:
+            evt = json.loads(raw)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if from_node and evt.get("from_node") != from_node:
+            continue
+        if to_surface and evt.get("to_surface") != to_surface:
+            continue
+        if decision and evt.get("decision") != decision:
+            continue
+        if correlation_id and evt.get("correlation_id") != correlation_id:
+            continue
+        ts = _parse_iso_ts(evt.get("timestamp"))
+        if since_dt and (ts is None or ts < since_dt):
+            continue
+        if until_dt and (ts is None or ts > until_dt):
+            continue
+        matches.append(evt)
+        if len(matches) >= last_n:
+            break
+    return {"results": matches, "scanned": scanned, "truncated": truncated}
+
+
+_CORE_HANDLERS: dict[str, Any] = {
+    "state": _core_state,
+    "processes": _core_processes,
+    "metrics": _core_metrics,
+    "audit_query": _core_audit_query,
+    "set_manifest": _core_set_manifest,
+    "reload_manifest": _core_reload_manifest,
+    "spawn": _core_spawn,
+    "stop": _core_stop,
+    "restart": _core_restart,
+    "reconcile": _core_reconcile,
+    "drain": _core_drain,
+}
+
+
+async def _dispatch_core_surface(state: "CoreState", surface_name: str,
+                                  env: dict) -> dict:
+    """Run the named core handler and wrap its result in a signed envelope."""
+    handler = _CORE_HANDLERS.get(surface_name)
+    response: dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "correlation_id": env.get("correlation_id") or env.get("id"),
+        "from": CORE_NODE_ID,
+        "to": env.get("from"),
+        "timestamp": now_iso(),
+    }
+    try:
+        if handler is None:
+            raise _CoreSurfaceError("unknown_surface", surface=surface_name)
+        result = await handler(state, env, env.get("payload") or {})
+        response["kind"] = "response"
+        response["payload"] = result
+    except _CoreSurfaceError as e:
+        response["kind"] = "error"
+        response["payload"] = {"error": e.reason, **e.details}
+    except Exception as e:
+        _log.exception("core surface %s raised", surface_name)
+        response["kind"] = "error"
+        response["payload"] = {
+            "error": "core_handler_exception",
+            "details": str(e)[:500],
+        }
+    response["signature"] = sign(response, state._core_secret)
+    return response
+
+
 # ---------- handlers ----------
 
 async def handle_register(request: web.Request) -> web.Response:
@@ -418,10 +836,12 @@ async def handle_register(request: web.Request) -> web.Response:
 
 async def _route_invocation(state: CoreState, env: dict,
                              *, signature_pre_verified: bool = False) -> tuple[int, dict]:
-    """Core invocation routing. Returns (http_status, response_dict).
+    """Core invocation routing. Returns ``(http_status, response_dict)``.
 
-    Used by both /v0/invoke (signature verified inside) and /v0/admin/invoke
-    (signature synthesized by Core, so verification is skipped).
+    Called by /v0/invoke after JSON parse. The ``signature_pre_verified``
+    knob is reserved for in-process callers that have already authenticated
+    the envelope (no current users — kept so future trusted shims don't
+    have to re-derive HMACs).
     """
     msg_id = env.get("id") or str(uuid.uuid4())
     env.setdefault("id", msg_id)
@@ -450,10 +870,12 @@ async def _route_invocation(state: CoreState, env: dict,
     if not signature_pre_verified:
         ok, err = state.check_replay(env)
         if not ok:
+            # SPEC §7: any replay-window or nonce rejection is a `denied_replay`.
             await state.audit(type="invocation", from_node=from_node, to_surface=to,
-                              decision=f"denied_{err}", correlation_id=correlation_id, details={})
+                              decision="denied_replay", correlation_id=correlation_id,
+                              details={"reason": err})
             state.emit_envelope(env=env, direction="in", signature_valid=True,
-                                route_status=f"denied_{err}")
+                                route_status="denied_replay")
             status = 409 if err == "replay_detected" else 401
             return status, {"error": err}
     if not isinstance(to, str) or "." not in to:
@@ -484,6 +906,20 @@ async def _route_invocation(state: CoreState, env: dict,
         state.emit_envelope(env=env, direction="in", signature_valid=True,
                             route_status="denied_schema_invalid")
         return 400, {"error": "denied_schema_invalid", "details": str(e)}
+    # SPEC §5.1: envelopes to core.* dispatch in-process; no SSE delivery.
+    if target_node == CORE_NODE_ID:
+        await state.audit(type="invocation", from_node=from_node, to_surface=to,
+                          decision="routed", correlation_id=correlation_id,
+                          details={"msg_id": msg_id, "in_process": True})
+        state.emit_envelope(env=env, direction="in", signature_valid=True,
+                            route_status="routed")
+        response_env = await _dispatch_core_surface(state, surface_name, env)
+        await state.audit(type="response", from_node=CORE_NODE_ID, to_surface=from_node,
+                          decision="routed", correlation_id=correlation_id,
+                          details={"kind": response_env.get("kind")})
+        state.emit_envelope(env=response_env, direction="out",
+                            signature_valid=True, route_status="routed")
+        return 200, response_env
     target_conn = state.connections.get(target_node)
     if not target_conn:
         await state.audit(type="invocation", from_node=from_node, to_surface=to,
@@ -508,7 +944,12 @@ async def _route_invocation(state: CoreState, env: dict,
         state.emit_envelope(env=env, direction="in", signature_valid=True, route_status="routed")
         return 202, {"id": msg_id, "status": "accepted"}
     fut: asyncio.Future = asyncio.get_event_loop().create_future()
-    state.pending[msg_id] = {"future": fut, "target_node": target_node, "from_node": from_node}
+    state.pending[msg_id] = {
+        "future": fut,
+        "target_node": target_node,
+        "from_node": from_node,
+        "to_surface": to,
+    }
     try:
         target_queue.put_nowait(deliver_event)
     except asyncio.QueueFull:
@@ -530,6 +971,9 @@ async def _route_invocation(state: CoreState, env: dict,
         await state.audit(type="invocation", from_node=from_node, to_surface=to,
                           decision="timeout", correlation_id=correlation_id, details={})
         return 504, {"error": "timeout", "id": msg_id}
+    except _PendingCancelled as cancelled:
+        state.pending.pop(msg_id, None)
+        return cancelled.status, cancelled.body
     finally:
         state.pending.pop(msg_id, None)
     return 200, result
@@ -555,6 +999,10 @@ async def handle_respond(request: web.Request) -> web.Response:
         return web.json_response({"error": "bad_kind", "expected": "response|error"}, status=400)
     ok, err = state.check_replay(env)
     if not ok:
+        # SPEC §7: replay-window or nonce rejections audit as `denied_replay`.
+        await state.audit(type="response", from_node=from_node,
+                          to_surface=env.get("to", ""), decision="denied_replay",
+                          correlation_id=env.get("correlation_id"), details={"reason": err})
         return web.json_response({"error": err}, status=409 if err == "replay_detected" else 401)
     correlation_id = env.get("correlation_id")
     if not correlation_id:
@@ -648,41 +1096,14 @@ async def handle_introspect(request: web.Request) -> web.Response:
     return web.json_response({"nodes": nodes, "relationships": edges})
 
 
-# ---------- admin ----------
-
-def _nodes_state_view(state: CoreState) -> list[dict]:
-    out = []
-    for nid, decl in state.nodes_decl.items():
-        out.append({
-            "id": nid,
-            "kind": decl["kind"],
-            "runtime": decl["runtime"],
-            "metadata": decl["metadata"],
-            "connected": nid in state.connections,
-            "surfaces": [
-                {
-                    "name": n,
-                    "type": s["type"],
-                    "invocation_mode": s["invocation_mode"],
-                    "schema": s["schema"],
-                }
-                for n, s in decl["surfaces"].items()
-            ],
-        })
-    return out
-
-
-async def handle_admin_state(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    return web.json_response({
-        "manifest_path": str(state.manifest_path),
-        "audit_path": str(state.audit_path),
-        "nodes": _nodes_state_view(state),
-        "relationships": [{"from": f, "to": t} for f, t in sorted(state.edges)],
-        "envelope_tail": list(state.envelope_tail),
-    })
+# ---------- admin (operator-only, SPEC §4.5) ----------
+#
+# Only TWO admin endpoints exist per SPEC §4.5:
+#   GET /v0/admin/stream   — raw SSE tap of every routed envelope
+#   GET /v0/admin/metrics  — Prometheus exposition of Core counters
+# Both are bearer-token gated. All previously-existing /v0/admin/{state,
+# manifest, reload, invoke, processes, spawn, stop, restart, reconcile,
+# drain} surfaces have moved to ``core.<name>`` and travel /v0/invoke.
 
 
 async def handle_admin_stream(request: web.Request) -> web.StreamResponse:
@@ -727,210 +1148,93 @@ async def handle_admin_stream(request: web.Request) -> web.StreamResponse:
     return response
 
 
-async def handle_admin_manifest(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    raw = await request.text()
-    try:
-        parsed = yaml.safe_load(raw)
-    except yaml.YAMLError as e:
-        return web.json_response({"error": "bad_yaml", "details": str(e)}, status=400)
-    if not isinstance(parsed, dict) or "nodes" not in parsed:
-        return web.json_response({"error": "manifest_missing_nodes"}, status=400)
-    # Validate the incoming yaml BEFORE writing it to disk. Warnings-mode:
-    # findings are printed but do not block the request.
-    _run_manifest_validator(
-        parsed, state.manifest_path.parent, source="/v0/admin/manifest"
-    )
-    backup = state.manifest_path.with_suffix(state.manifest_path.suffix + ".bak")
-    if state.manifest_path.exists():
-        backup.write_text(state.manifest_path.read_text())
-    state.manifest_path.write_text(raw)
-    try:
-        # Skip the load-time re-validation — we just validated the same dict
-        # pre-write. Avoids duplicating the summary line on every POST.
-        state.load_manifest(source="/v0/admin/manifest", validate=False)
-    except Exception as e:
-        if backup.exists():
-            state.manifest_path.write_text(backup.read_text())
-            state.load_manifest(source="/v0/admin/manifest:rollback", validate=False)
-        return web.json_response({"error": "load_failed", "details": str(e)}, status=400)
-    return web.json_response({
-        "ok": True,
-        "manifest_path": str(state.manifest_path),
-        "nodes_declared": len(state.nodes_decl),
-        "edges": len(state.edges),
-    })
-
-
-async def handle_admin_reload(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    try:
-        state.load_manifest(source="/v0/admin/reload")
-    except Exception as e:
-        return web.json_response({"error": "load_failed", "details": str(e)}, status=400)
-    return web.json_response({
-        "ok": True,
-        "nodes_declared": len(state.nodes_decl),
-        "edges": len(state.edges),
-    })
-
-
-# ---------- supervisor admin endpoints ----------
-#
-# These four endpoints are no-ops if the Core was started without
-# --supervisor / MESH_SUPERVISOR=1. In that mode, scripts/run_mesh.sh
-# still owns process lifecycle. With supervisor enabled, Core owns it.
-
-def _require_supervisor(state: CoreState) -> web.Response | None:
-    if state.supervisor is None:
-        return web.json_response(
-            {"error": "supervisor_disabled",
-             "details": "Core started without --supervisor; "
-                        "scripts/run_mesh.sh owns processes"},
-            status=409,
-        )
-    return None
-
-
-async def handle_admin_processes(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    if state.supervisor is None:
-        return web.json_response({"supervisor_enabled": False, "processes": []})
-    return web.json_response({
-        "supervisor_enabled": True,
-        "processes": state.supervisor.list_processes(),
-    })
-
-
-async def handle_admin_spawn(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    err = _require_supervisor(state)
-    if err is not None:
-        return err
-    body = await request.json()
-    nid = body.get("node_id")
-    if not nid:
-        return web.json_response({"error": "missing_node_id"}, status=400)
-    manifest_node = state.manifest_nodes_raw.get(nid)
-    if manifest_node is None:
-        return web.json_response({"error": "unknown_node",
-                                  "details": f"{nid} not in current manifest"},
-                                 status=404)
-    res = await state.supervisor.spawn(nid, manifest_node)
-    return web.json_response(res)
-
-
-async def handle_admin_stop(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    err = _require_supervisor(state)
-    if err is not None:
-        return err
-    body = await request.json()
-    nid = body.get("node_id")
-    graceful = bool(body.get("graceful", True))
-    if not nid:
-        return web.json_response({"error": "missing_node_id"}, status=400)
-    res = await state.supervisor.stop(nid, graceful=graceful)
-    return web.json_response(res)
-
-
-async def handle_admin_restart(request: web.Request) -> web.Response:
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    err = _require_supervisor(state)
-    if err is not None:
-        return err
-    body = await request.json()
-    nid = body.get("node_id")
-    if not nid:
-        return web.json_response({"error": "missing_node_id"}, status=400)
-    manifest_node = state.manifest_nodes_raw.get(nid)
-    if manifest_node is None:
-        return web.json_response({"error": "unknown_node"}, status=404)
-    res = await state.supervisor.restart(nid, manifest_node)
-    return web.json_response(res)
-
-
-async def handle_admin_reconcile(request: web.Request) -> web.Response:
-    """Diff manifest desired set vs. running set. Spawn missing, stop extras."""
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    err = _require_supervisor(state)
-    if err is not None:
-        return err
-    res = await state.supervisor.reconcile(state.manifest_nodes_raw)
-    return web.json_response(res)
-
-
-async def handle_admin_drain(request: web.Request) -> web.Response:
-    """Stop accepting new work for a child, wait for in-flight to finish, then SIGTERM."""
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    err = _require_supervisor(state)
-    if err is not None:
-        return err
-    body = await request.json()
-    nid = body.get("node_id")
-    timeout = float(body.get("timeout", 30.0))
-    if not nid:
-        return web.json_response({"error": "missing_node_id"}, status=400)
-    res = await state.supervisor.drain(nid, timeout=timeout)
-    return web.json_response(res)
-
-
 async def handle_admin_metrics(request: web.Request) -> web.Response:
-    """Per-child + aggregate supervisor metrics (restart counts, uptime, in-flight)."""
+    """Prometheus exposition of Core counters/gauges (SPEC §4.5).
+
+    Plain-text ``text/plain; version=0.0.4`` body. Every metric is a gauge —
+    Core does not track monotonic counters at this layer (those live in the
+    audit log). Supervisor totals are surfaced when supervisor is attached.
+    """
     if not _admin_authed(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     state: CoreState = request.app["state"]
-    if state.supervisor is None:
-        return web.json_response({"supervisor_enabled": False, "metrics": None})
-    return web.json_response({
-        "supervisor_enabled": True,
-        "metrics": state.supervisor.metrics(),
-    })
+    lines: list[str] = []
+
+    def gauge(name: str, value: float, help_text: str,
+              labels: dict[str, str] | None = None) -> None:
+        if not lines or not lines[-1].startswith(f"# TYPE {name} "):
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} gauge")
+        if labels:
+            label_str = ",".join(
+                f'{k}="{_prom_escape(v)}"' for k, v in sorted(labels.items())
+            )
+            lines.append(f"{name}{{{label_str}}} {value}")
+        else:
+            lines.append(f"{name} {value}")
+
+    gauge("mesh_nodes_declared", len(state.nodes_decl),
+          "Number of nodes declared in the manifest (includes the built-in core node).")
+    gauge("mesh_nodes_connected", len(state.connections),
+          "Number of nodes with a live SSE session.")
+    gauge("mesh_edges", len(state.edges),
+          "Number of allow-edges declared in the manifest.")
+    gauge("mesh_pending_invocations", len(state.pending),
+          "Invocations awaiting a response.")
+    gauge("mesh_replay_nonce_lru", len(state._replay_nonces),  # noqa: SLF001
+          "Current size of the replay-protection nonce LRU.")
+    gauge("mesh_envelope_tail_size", len(state.envelope_tail),
+          "Current depth of the in-memory routed-envelope ring buffer.")
+    gauge("mesh_admin_streams", len(state._admin_streams),  # noqa: SLF001
+          "Number of /v0/admin/stream consumers attached.")
+    gauge("mesh_node_streams", len(state._streams),  # noqa: SLF001
+          "Number of /v0/stream node consumers attached.")
+    gauge("mesh_replay_window_seconds", state.replay_window_s,
+          "Configured replay-window width in seconds.")
+
+    if state.supervisor is not None:
+        m = state.supervisor.metrics()
+        totals = m.get("totals", {}) or {}
+        gauge("mesh_supervisor_uptime_seconds",
+              float(m.get("supervisor_uptime_seconds", 0)),
+              "Seconds since the supervisor started.")
+        gauge("mesh_supervisor_children_total", float(totals.get("children", 0)),
+              "Number of supervised children currently tracked.")
+        gauge("mesh_supervisor_children_running", float(totals.get("running", 0)),
+              "Children currently in the running state.")
+        gauge("mesh_supervisor_children_draining", float(totals.get("draining", 0)),
+              "Children currently being drained.")
+        gauge("mesh_supervisor_children_failed", float(totals.get("failed", 0)),
+              "Children currently in the failed state.")
+        gauge("mesh_supervisor_restarts_total", float(totals.get("restarts", 0)),
+              "Cumulative supervised-process restarts since supervisor started.")
+        for child in m.get("children", []):
+            labels = {"node_id": child.get("node_id", "?"),
+                      "status": child.get("status", "?")}
+            gauge("mesh_supervisor_child_uptime_seconds",
+                  float(child.get("uptime_seconds", 0)),
+                  "Per-child uptime in seconds (0 when not running).",
+                  labels=labels)
+            gauge("mesh_supervisor_child_restart_total",
+                  float(child.get("restart_count_total", 0)),
+                  "Per-child cumulative restart count.",
+                  labels=labels)
+            gauge("mesh_supervisor_child_in_flight",
+                  float(child.get("in_flight", 0)),
+                  "Per-child currently in-flight invocations.",
+                  labels=labels)
+
+    body = "\n".join(lines) + "\n"
+    return web.Response(
+        body=body.encode("utf-8"),
+        headers={"Content-Type": "text/plain; version=0.0.4; charset=utf-8"},
+    )
 
 
-async def handle_admin_invoke(request: web.Request) -> web.Response:
-    """Synthesize a signed envelope from a chosen registered node and route it."""
-    if not _admin_authed(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    state: CoreState = request.app["state"]
-    body = await request.json()
-    from_node = body.get("from_node")
-    target = body.get("target")
-    payload = body.get("payload", {})
-    decl = state.nodes_decl.get(from_node) if from_node else None
-    if not decl:
-        return web.json_response({"error": "unknown_node", "from_node": from_node}, status=404)
-    if not isinstance(target, str) or "." not in target:
-        return web.json_response({"error": "bad_target"}, status=400)
-    msg_id = str(uuid.uuid4())
-    env = {
-        "id": msg_id,
-        "correlation_id": msg_id,
-        "from": from_node,
-        "to": target,
-        "kind": "invocation",
-        "payload": payload,
-        "timestamp": now_iso(),
-    }
-    env["signature"] = sign(env, decl["secret"])
-    status, result = await _route_invocation(state, env, signature_pre_verified=True)
-    return web.json_response(result, status=status)
+def _prom_escape(value: str) -> str:
+    # Per the Prometheus exposition format, label values must escape `\`,
+    # `"`, and newline.
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 @web.middleware
@@ -1083,18 +1387,10 @@ def make_app(
     app.router.add_get("/v0/stream", handle_stream)
     app.router.add_get("/v0/healthz", handle_health)
     app.router.add_get("/v0/introspect", handle_introspect)
-    app.router.add_get("/v0/admin/state", handle_admin_state)
+    # SPEC §4.5: only two operator endpoints remain. State, manifest, reload,
+    # processes, supervisor lifecycle, and synthesised invoke all moved to
+    # core.<surface> and travel /v0/invoke.
     app.router.add_get("/v0/admin/stream", handle_admin_stream)
-    app.router.add_post("/v0/admin/manifest", handle_admin_manifest)
-    app.router.add_post("/v0/admin/reload", handle_admin_reload)
-    app.router.add_post("/v0/admin/invoke", handle_admin_invoke)
-    # Supervisor endpoints (always registered; no-op if supervisor disabled).
-    app.router.add_get("/v0/admin/processes", handle_admin_processes)
-    app.router.add_post("/v0/admin/spawn", handle_admin_spawn)
-    app.router.add_post("/v0/admin/stop", handle_admin_stop)
-    app.router.add_post("/v0/admin/restart", handle_admin_restart)
-    app.router.add_post("/v0/admin/reconcile", handle_admin_reconcile)
-    app.router.add_post("/v0/admin/drain", handle_admin_drain)
     app.router.add_get("/v0/admin/metrics", handle_admin_metrics)
 
     async def on_shutdown(app: web.Application) -> None:
