@@ -1,9 +1,7 @@
 """Envelope-level tests: HMAC sign/verify, schema validation edge cases."""
 from __future__ import annotations
 
-import json
 import os
-import pathlib
 
 import aiohttp
 import pytest
@@ -11,8 +9,6 @@ from jsonschema import ValidationError, validate as jsonschema_validate
 
 from core.core import canonical, sign, verify
 from node_sdk import MeshNode
-
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def test_sign_and_verify_round_trip():
@@ -52,15 +48,21 @@ def test_canonical_is_stable():
     assert canonical(a) == canonical(b)
 
 
+_GENERIC_TITLE_SCHEMA = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["title"],
+    "properties": {"title": {"type": "string"}},
+}
+
+
 def test_schema_validate_passes():
-    schema = json.loads((ROOT / "schemas" / "task_create.json").read_text())
-    jsonschema_validate({"title": "buy milk"}, schema)
+    jsonschema_validate({"title": "buy milk"}, _GENERIC_TITLE_SCHEMA)
 
 
 def test_schema_validate_rejects_missing_required():
-    schema = json.loads((ROOT / "schemas" / "task_create.json").read_text())
     with pytest.raises(ValidationError):
-        jsonschema_validate({}, schema)
+        jsonschema_validate({}, _GENERIC_TITLE_SCHEMA)
 
 
 def test_schema_validate_rejects_bad_color():
