@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "nexus_agent_bridge": {
-      "command": "python3",
-      "args": ["/etc/agent/mcp_bridge.py"]
-    }
-  }
-}
