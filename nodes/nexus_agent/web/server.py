@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from node_sdk.sse import SSEHub, serve_sse
+from node_sdk.inspector.sse import SSEHub, serve_sse
 
 if TYPE_CHECKING:
     from ..agent import AgentRuntime

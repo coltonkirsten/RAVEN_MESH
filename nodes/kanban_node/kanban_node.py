@@ -34,7 +34,7 @@ import uuid
 from aiohttp import web
 
 from node_sdk import MeshDeny, MeshNode
-from node_sdk.sse import SSEHub, serve_sse
+from node_sdk.inspector.sse import SSEHub, serve_sse
 
 log = logging.getLogger("kanban_node")
 HERE = pathlib.Path(__file__).resolve().parent

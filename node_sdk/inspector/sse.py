@@ -35,7 +35,7 @@ from typing import Any, Callable, Iterable
 
 from aiohttp import web
 
-log = logging.getLogger("node_sdk.sse")
+log = logging.getLogger("node_sdk.inspector.sse")
 
 
 # An item flowing through a subscriber queue or replay buffer.
