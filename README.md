@@ -2,9 +2,34 @@
 
 A small protocol where every participant — human, agent, tool, device, runtime — is a uniformly-modeled **node** exposing typed **surfaces**, and every interaction crosses a declared **relationship** mediated by a thin **Core**. Core owns identity, routing, and audit. Nothing else. Memory, scheduling, approvals, dashboards — all of those are themselves nodes.
 
-This repo is the **v0 reference implementation**: a single-process Python Core (~430 lines) plus four real reference nodes (cron, webui, human dashboard, approval) and four protocol-test dummies.
+This repo is the **protocol layer**: a single-process Python Core (~430 lines), the Python `node_sdk`, the manifest format, the wire schemas, and the conformance test suite. No node implementations live here, no UI, no example product — those have been moved out so the protocol can be forked and reused for a totally different mesh-shaped product without carrying kanban-shaped opinions.
 
-> **Status:** v0.4 — Python prototype, local-first. The protocol is the contract; the prototype is the conformance test. The BEAM/Elixir refactor is a future state, not this build.
+> **Status:** v0.4 — Python prototype, local-first. The protocol is the contract; this implementation is the conformance test.
+
+## Repo tour
+
+```
+core/          single-process Python Core. one file: core/core.py.
+node_sdk/      MeshNode helper — every Python node uses this.
+schemas/       JSON Schemas:
+  manifest.json    manifest validator
+  core/            schemas for the core.* surfaces (state, audit_query, etc.)
+manifests/     (empty — supply your own and pass --manifest at boot)
+scripts/       (empty — run Core directly with python3 -m core.core)
+tests/         pytest suite — protocol conformance, ~140 tests
+docs/
+  SPEC.md         authoritative wire + manifest spec
+  PHILOSOPHY.md   why the protocol has the shape it has
+mesh.toml.example  TOML config template with comments
+```
+
+## Companion library
+
+Example meshes, reference node implementations (cron, webui, human, approval, kanban, voice, nexus agent, dummies for protocol testing), and a browser dashboard live at:
+
+**https://github.com/R-A-V-E-N-delegate/raven-mesh-nodes**
+
+That's where to look for "how do I plug a real node in" or "show me a working demo". Pin it to a specific revision of this protocol repo and it builds on top of the surfaces defined here.
 
 ## Quick start
 
@@ -14,39 +39,20 @@ cd RAVEN_MESH
 
 pip install aiohttp pydantic pyyaml jsonschema croniter structlog pytest pytest-asyncio
 
-python3 -m pytest                    # protocol test suite
-scripts/run_demo.sh start            # protocol-validation demo (Core + tasks + approval)
+python3 -m pytest                                       # protocol conformance suite
+python3 -m core.core --manifest path/to/your.yaml       # boot Core with a manifest
 ```
 
 Core health: http://127.0.0.1:8000/v0/healthz
 Core registry: http://127.0.0.1:8000/v0/introspect
 
-## Repo tour
-
-```
-core/          single-process Python Core. one file: core/core.py.
-node_sdk/      MeshNode helper — every Python node uses this.
-nodes/
-  dummy/         protocol-test dummies (actor, capability, approval, hybrid)
-  cron_node/     hybrid; persists schedules to data/crons.json
-  webui_node/    capability with browser dashboard on :8801
-  human_node/    actor with dashboard on :8802 (inbox + invoke any allowed surface)
-  approval_node/ approval with dashboard on :8803 (Approve / Deny pending requests)
-schemas/       JSON Schemas referenced by manifests
-manifests/
-  demo.yaml         protocol-validation demo (drives tests/)
-scripts/       bash wrappers; source scripts/_env.sh for deterministic dev secrets
-tests/         pytest suite — all ten PRD §7 flows pass
-docs/
-  PROTOCOL.md     language-agnostic protocol spec — write a node in any language
-  PROTOTYPE.md    how this Python implementation is structured + how to refactor away
-```
+To actually drive a mesh, write a manifest (see SPEC §8) or grab one from the companion library above. Core no longer ships with a default manifest — boot fails fast with a clear error if `--manifest` isn't supplied.
 
 ## Configuration
 
 Core's non-secret tunables (host, port, manifest path, admin rate limits, replay window, supervisor toggles, audit log path) load from a TOML file with env-var and CLI overrides. Secrets stay in env vars only.
 
-**Precedence (highest wins):** CLI flag → env var (`MESH_HOST`, `MESH_PORT`, …) → TOML file → built-in default.
+**Precedence (highest wins):** CLI flag → env var (`MESH_HOST`, `MESH_PORT`, `MESH_MANIFEST`, …) → TOML file → built-in default.
 
 - **TOML file:** `mesh.toml` in the working directory (or `configs/mesh.toml`, or pass `--config path/to/file.toml`, or set `MESH_CONFIG`). See [`mesh.toml.example`](mesh.toml.example) for the full schema with comments.
 - **Secrets stay env-only:** `ADMIN_TOKEN` and per-node `identity_secret` (resolved via `env:VAR_NAME` in the manifest) are never read from the TOML.
@@ -54,13 +60,12 @@ Core's non-secret tunables (host, port, manifest path, admin rate limits, replay
 
 ## Spec
 
-- **Wire protocol & envelope:** [docs/PROTOCOL.md](docs/PROTOCOL.md)
-- **Prototype internals & runbook:** [docs/PROTOTYPE.md](docs/PROTOTYPE.md)
-- **PRD (v0.4):** lives in the parent `raven` workspace at `context/research/raven_mesh_v0_prd.md`
+- **Wire protocol, envelope, manifest format, conformance:** [docs/SPEC.md](docs/SPEC.md)
+- **Why the protocol has this shape:** [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md)
 
 ## Tests
 
-`tests/test_protocol.py` boots Core in-process and exercises all ten flows from PRD §7, including a non-SDK external node that speaks the protocol with hand-rolled stdlib HTTP. If those pass, the protocol is preserved.
+`tests/test_protocol.py` boots Core in-process and exercises the ten PRD §7 flows, including a non-SDK external node that speaks the protocol with hand-rolled stdlib HTTP. If those pass, the protocol is preserved.
 
 ```bash
 python3 -m pytest -v
@@ -68,7 +73,7 @@ python3 -m pytest -v
 
 ## Adding a node in any language
 
-1. Read [docs/PROTOCOL.md](docs/PROTOCOL.md) — that's the whole contract.
+1. Read [docs/SPEC.md](docs/SPEC.md) — that's the whole contract.
 2. Add it to a manifest with its declared surfaces and edges.
 3. Implement: `POST /v0/register`, an `EventSource` consumer of `GET /v0/stream`, and `POST /v0/respond`. That's it.
 

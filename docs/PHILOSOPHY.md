@@ -45,16 +45,21 @@ The protocol is unopinionated. The product is opinionated. They must
 remain separable.
 
 **Protocol layer** — what every conformant Core implementation must
-provide: `core/`, `node_sdk/`, `schemas/`, `docs/`.
+provide, and what lives in *this* repo: `core/`, `node_sdk/`,
+`schemas/`, `docs/`. `manifests/` and `scripts/` exist as empty
+directories because Core no longer ships a default manifest or
+launcher shims.
 
-**Opinionated layer** — this build's particular product on top:
-`nodes/`, `dashboard/`, `manifests/`, `scripts/`.
+**Opinionated layer** — node implementations, example meshes, and the
+browser dashboard. Moved to a companion repo at
+[R-A-V-E-N-delegate/raven-mesh-nodes](https://github.com/R-A-V-E-N-delegate/raven-mesh-nodes).
+That separation is the layering rule made physical: a fresh fork of
+this repo is a protocol kit, not a half-built kanban app.
 
-The discriminator is the **substitution test**: fork the repo, delete
-everything in the opinionated layer, and try to build a totally
-different product (a feed reader, a sensor mesh, a webhook pipeline,
-a chat-bot stack) on the protocol layer that remains. If you can do
-it without editing `core/` or `node_sdk/`, the protocol stayed
+The discriminator is the **substitution test**: fork this repo and
+try to build a totally different product (a feed reader, a sensor
+mesh, a webhook pipeline, a chat-bot stack) on what remains. If you
+can do it without editing `core/` or `node_sdk/`, the protocol stayed
 unopinionated. If you can't — if a kanban-shaped assumption forced
 you to subclass an SDK helper or add a knob to Core — the protocol
 leaked opinion and the leak is a bug.
