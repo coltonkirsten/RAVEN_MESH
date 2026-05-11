@@ -109,7 +109,10 @@ def validate_manifest(
             continue  # already reported by schema validation
 
         if nid in _RESERVED_NODE_IDS:
-            errors.append(f"node[{idx}].id: '{nid}' is reserved")
+            errors.append(
+                f"node[{idx}].id: '{nid}' is reserved for the Core broker "
+                f"(see SPEC §5.1); pick a different node id"
+            )
         # Even if the schema pattern catches dots/slashes, repeat the check
         # explicitly so error messages are operator-readable.
         if "." in nid or "/" in nid:
