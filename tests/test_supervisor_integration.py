@@ -332,7 +332,9 @@ async def test_supervisor_disabled_returns_error_envelope(tmp_path):
 async def test_metrics_endpoint_disabled_when_supervisor_off(tmp_path):
     """With supervisor disabled, /v0/admin/metrics still exposes Core-only gauges."""
     audit_path = tmp_path / "audit.log"
-    manifest = ROOT / "manifests" / "demo.yaml"
+    # Ephemeral manifest — same _build_manifest the supervised-tests use,
+    # except we boot Core with enable_supervisor=False.
+    manifest = _build_manifest(tmp_path)
     app = make_app(str(manifest), str(audit_path), enable_supervisor=False)
     runner = web.AppRunner(app)
     await runner.setup()
