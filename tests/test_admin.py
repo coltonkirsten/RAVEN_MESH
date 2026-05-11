@@ -147,36 +147,47 @@ async def test_admin_rejects_query_string_token(core_server):
             assert r.status == 401
 
 
+def _trivial_manifest(tmp_path):
+    """Build a one-node ephemeral manifest. The tests using this don't care
+    about the mesh shape — they care about make_app's boot-time invariants
+    (ADMIN_TOKEN gating, rate limiting). Anything that loads is enough.
+    """
+    from tests._mesh_helpers import (
+        build_ephemeral_manifest, minimal_actor, minimal_surface,
+    )
+    return build_ephemeral_manifest(
+        tmp_path,
+        [minimal_actor("solo", surfaces=[minimal_surface("inbox")])],
+    )
+
+
 async def test_admin_token_boot_check_refuses_unset(monkeypatch, tmp_path):
     """make_app must refuse to start with no ADMIN_TOKEN."""
-    import pathlib as _p
     from core.core import make_app as _make_app
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
-    manifest = _p.Path(__file__).resolve().parent.parent / "manifests" / "demo.yaml"
+    manifest = _trivial_manifest(tmp_path)
     with pytest.raises(RuntimeError, match="ADMIN_TOKEN"):
         _make_app(str(manifest), str(tmp_path / "audit.log"))
 
 
 async def test_admin_token_boot_check_refuses_legacy_default(monkeypatch, tmp_path):
     """make_app must refuse to start with the legacy 'admin-dev-token'."""
-    import pathlib as _p
     from core.core import make_app as _make_app
     monkeypatch.setenv("ADMIN_TOKEN", "admin-dev-token")
-    manifest = _p.Path(__file__).resolve().parent.parent / "manifests" / "demo.yaml"
+    manifest = _trivial_manifest(tmp_path)
     with pytest.raises(RuntimeError, match="legacy placeholder"):
         _make_app(str(manifest), str(tmp_path / "audit.log"))
 
 
 async def test_admin_rate_limit_returns_429(monkeypatch, tmp_path):
     """Token bucket on /v0/admin/* returns 429 once burst exhausts."""
-    import pathlib as _p
     import socket as _socket
     from aiohttp import web as _web
     from core.core import make_app as _make_app
 
     monkeypatch.setenv("MESH_ADMIN_RATE_LIMIT", "60")
     monkeypatch.setenv("MESH_ADMIN_RATE_BURST", "3")
-    manifest = _p.Path(__file__).resolve().parent.parent / "manifests" / "demo.yaml"
+    manifest = _trivial_manifest(tmp_path)
     app = _make_app(str(manifest), str(tmp_path / "audit.log"))
     runner = _web.AppRunner(app)
     await runner.setup()
