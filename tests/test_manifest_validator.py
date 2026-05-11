@@ -10,7 +10,6 @@ import pathlib
 import sys
 
 import pytest
-import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -78,17 +77,48 @@ def test_valid_manifest_returns_no_errors_or_warnings(tmp_path):
     assert warnings == []
 
 
-def test_real_demo_manifest_passes(tmp_path):
-    """The shipped demo.yaml should validate cleanly."""
-    manifest_path = ROOT / "manifests" / "demo.yaml"
-    manifest = yaml.safe_load(manifest_path.read_text())
-    # Inject all the env vars demo.yaml references so identity_secret warnings
-    # don't fire.
-    env = {v: "x" for v in [
-        "VOICE_SECRET", "TASKS_SECRET",
-        "HUMAN_APPROVAL_SECRET", "EXTERNAL_NODE_SECRET",
-    ]}
-    errors, _ = validate_manifest(manifest, manifest_path.parent, env=env)
+def test_realistic_multi_node_manifest_passes(tmp_path):
+    """A realistic four-node mesh — actor + capability + approval + capability,
+    with relationships covering every invocation_mode — validates cleanly.
+
+    Stand-in for the historical ``test_real_demo_manifest_passes`` which
+    used to load the shipped demo.yaml. We construct an equivalent shape
+    inline here so the validator is exercised against a non-trivial
+    manifest without depending on any file outside tmp_path.
+    """
+    inbox = _write_schema(tmp_path, "inbox.json")
+    create = _write_schema(tmp_path, "create.json")
+    listing = _write_schema(tmp_path, "list.json")
+    approve = _write_schema(tmp_path, "approve.json")
+    ping = _write_schema(tmp_path, "ping.json")
+    manifest = {
+        "nodes": [
+            _node("actor", kind="actor",
+                  identity_secret="env:ACTOR_SECRET",
+                  surfaces=[_surface("inbox", inbox, type_="inbox",
+                                     invocation_mode="fire_and_forget")]),
+            _node("worker", kind="capability",
+                  identity_secret="env:WORKER_SECRET",
+                  surfaces=[_surface("create", create),
+                            _surface("list", listing)]),
+            _node("approval", kind="approval",
+                  identity_secret="env:APPROVAL_SECRET",
+                  surfaces=[_surface("inbox", approve, type_="inbox")]),
+            _node("external", kind="capability",
+                  identity_secret="env:EXTERNAL_SECRET",
+                  surfaces=[_surface("ping", ping)]),
+        ],
+        "relationships": [
+            {"from": "actor", "to": "worker.list"},
+            {"from": "actor", "to": "approval.inbox"},
+            {"from": "approval", "to": "worker.create"},
+            {"from": "actor", "to": "external.ping"},
+        ],
+    }
+    env = {v: "x" for v in (
+        "ACTOR_SECRET", "WORKER_SECRET", "APPROVAL_SECRET", "EXTERNAL_SECRET"
+    )}
+    errors, _ = validate_manifest(manifest, tmp_path, env=env)
     assert errors == [], errors
 
 
