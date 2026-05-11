@@ -1,6 +1,11 @@
 # PROTOTYPE — running the Python Core, and how it's structured
 
-This is the Python reference implementation of [the protocol](./PROTOCOL.md). It is deliberately small, deliberately single-process, deliberately easy to throw away when the BEAM refactor lands.
+> **Historical reference.** The authoritative protocol specification is
+> [`docs/SPEC.md`](./SPEC.md). This file documents the Python reference
+> implementation's run/layout details and may lag the spec when the two
+> disagree — `SPEC.md` wins.
+
+This is the Python reference implementation of [the protocol](./SPEC.md). It is deliberately small, deliberately single-process, deliberately easy to throw away when the BEAM refactor lands.
 
 ## Run it
 

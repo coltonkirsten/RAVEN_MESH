@@ -1,5 +1,11 @@
 # RAVEN Mesh Wire Protocol — v0
 
+> **Historical reference.** The authoritative wire-protocol specification is
+> now [`docs/SPEC.md`](./SPEC.md). When this document and `SPEC.md` disagree,
+> `SPEC.md` wins. This file is preserved for historical context (e.g.
+> background on the v0 design discussions and the original conformance
+> framing). New work should cite `SPEC.md`.
+
 This is the language-agnostic specification. Anyone reading this should be able to write a node in any language without reading Core's source.
 
 ## 1. Vocabulary
