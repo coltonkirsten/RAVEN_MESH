@@ -41,11 +41,21 @@ def _set_demo_secrets() -> None:
 
 @pytest_asyncio.fixture
 async def core_server(tmp_path):
-    """Boots Core on a fresh port with a per-test audit log."""
+    """Boots Core on a fresh port with a per-test audit log.
+
+    The demo manifest is copied into ``tmp_path/manifests`` so tests that
+    invoke ``core.set_manifest`` cannot mutate the source-of-truth YAML.
+    """
+    import shutil
     _set_demo_secrets()
     audit_path = tmp_path / "audit.log"
     os.environ["AUDIT_LOG"] = str(audit_path)
-    manifest = ROOT / "manifests" / "demo.yaml"
+    src_manifest = ROOT / "manifests" / "demo.yaml"
+    dst_manifests = tmp_path / "manifests"
+    dst_manifests.mkdir()
+    shutil.copytree(ROOT / "schemas", tmp_path / "schemas")
+    manifest = dst_manifests / "demo.yaml"
+    manifest.write_text(src_manifest.read_text())
     app = make_app(str(manifest), str(audit_path))
     runner = web.AppRunner(app)
     await runner.setup()

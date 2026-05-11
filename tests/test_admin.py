@@ -1,4 +1,7 @@
-"""Admin endpoint tests — /v0/admin/{state,stream,manifest,reload,invoke,...}."""
+"""Operator endpoint tests — only ``/v0/admin/{stream,metrics}`` survive
+SPEC §4.5; every other operator action lives on ``core.<surface>`` and is
+covered by tests/test_core_surfaces.py.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -32,37 +35,12 @@ async def _spawn_tasks_node(core_url: str):
     return node
 
 
-async def test_admin_state_returns_expected_shape(core_server):
-    url = core_server["url"]
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"{url}/v0/admin/state", headers=HEADERS) as r:
-            assert r.status == 200
-            data = await r.json()
-    assert "nodes" in data and "relationships" in data and "envelope_tail" in data
-    node_ids = {n["id"] for n in data["nodes"]}
-    assert {"voice_actor", "tasks", "human_approval"} <= node_ids
-    # Each surface comes back with its full schema dict.
-    voice = next(n for n in data["nodes"] if n["id"] == "voice_actor")
-    assert voice["surfaces"][0]["schema"]["type"] == "object"
-
-
-async def test_admin_state_requires_auth(core_server):
-    url = core_server["url"]
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"{url}/v0/admin/state") as r:
-            assert r.status == 401
-        async with s.get(f"{url}/v0/admin/state",
-                          headers={"X-Admin-Token": "wrong"}) as r:
-            assert r.status == 401
-
-
 async def test_admin_stream_delivers_envelope_events(core_server):
     url = core_server["url"]
     tasks = await _spawn_tasks_node(url)
     voice = MeshNode(node_id="voice_actor",
                       secret=os.environ["VOICE_SECRET"], core_url=url)
     await voice.start()
-    # Subscribe to stream first.
     received: list[dict] = []
     seen = asyncio.Event()
 
@@ -93,7 +71,6 @@ async def test_admin_stream_delivers_envelope_events(core_server):
 
     consumer = asyncio.create_task(consume())
     try:
-        # Tiny delay so the consumer actually subscribes before we fire.
         await asyncio.sleep(0.1)
         await voice.invoke("tasks.list", {})
         await asyncio.wait_for(seen.wait(), timeout=5)
@@ -118,69 +95,54 @@ async def test_admin_stream_requires_auth(core_server):
             assert r.status == 401
 
 
-async def test_admin_envelope_tail_records_recent_invocations(core_server):
-    url = core_server["url"]
-    tasks = await _spawn_tasks_node(url)
-    voice = MeshNode(node_id="voice_actor",
-                      secret=os.environ["VOICE_SECRET"], core_url=url)
-    await voice.start()
-    try:
-        await voice.invoke("tasks.list", {})
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"{url}/v0/admin/state", headers=HEADERS) as r:
-                data = await r.json()
-        tail = data["envelope_tail"]
-        assert any(e["to_surface"] == "tasks.list" and e["direction"] == "in"
-                   for e in tail)
-        assert any(e["direction"] == "out" for e in tail)  # response also tapped
-    finally:
-        await asyncio.gather(tasks.stop(), voice.stop())
-
-
-async def test_admin_reload_succeeds(core_server):
+async def test_admin_metrics_returns_prometheus(core_server):
     url = core_server["url"]
     async with aiohttp.ClientSession() as s:
-        async with s.post(f"{url}/v0/admin/reload", headers=HEADERS) as r:
+        async with s.get(f"{url}/v0/admin/metrics", headers=HEADERS) as r:
             assert r.status == 200
-            data = await r.json()
-            assert data["ok"] is True
-            assert data["nodes_declared"] >= 3
-        async with s.post(f"{url}/v0/admin/reload") as r:
+            assert r.headers["Content-Type"].startswith("text/plain")
+            body = await r.text()
+    # Spot-check a representative metric line and the HELP/TYPE preamble.
+    assert "# TYPE mesh_nodes_declared gauge" in body
+    assert "mesh_nodes_declared " in body
+    assert "mesh_edges " in body
+    assert "mesh_replay_window_seconds " in body
+
+
+async def test_admin_metrics_requires_auth(core_server):
+    url = core_server["url"]
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"{url}/v0/admin/metrics") as r:
             assert r.status == 401
 
 
-async def test_admin_invoke_routes_synthetic_envelope(core_server):
+async def test_removed_admin_endpoints_404(core_server):
+    """SPEC §4.5: state/manifest/reload/invoke/spawn/etc. no longer exist."""
     url = core_server["url"]
-    tasks = await _spawn_tasks_node(url)
-    voice = MeshNode(node_id="voice_actor",
-                      secret=os.environ["VOICE_SECRET"], core_url=url)
-    await voice.start()
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{url}/v0/admin/invoke", headers=HEADERS, json={
-                "from_node": "voice_actor",
-                "target": "tasks.list",
-                "payload": {},
-            }) as r:
-                assert r.status == 200
-                data = await r.json()
-                assert data["kind"] == "response"
-                assert "tasks" in data["payload"]
-        # Without auth, denied.
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{url}/v0/admin/invoke", json={
-                "from_node": "voice_actor", "target": "tasks.list", "payload": {},
-            }) as r:
-                assert r.status == 401
-    finally:
-        await asyncio.gather(tasks.stop(), voice.stop())
+    gone = [
+        ("GET", "/v0/admin/state"),
+        ("POST", "/v0/admin/manifest"),
+        ("POST", "/v0/admin/reload"),
+        ("POST", "/v0/admin/invoke"),
+        ("GET", "/v0/admin/processes"),
+        ("POST", "/v0/admin/spawn"),
+        ("POST", "/v0/admin/stop"),
+        ("POST", "/v0/admin/restart"),
+        ("POST", "/v0/admin/reconcile"),
+        ("POST", "/v0/admin/drain"),
+    ]
+    async with aiohttp.ClientSession() as s:
+        for method, path in gone:
+            async with s.request(method, f"{url}{path}", headers=HEADERS,
+                                  json={}) as r:
+                assert r.status == 404, f"{method} {path} expected 404, got {r.status}"
 
 
 async def test_admin_rejects_query_string_token(core_server):
     """Header-only auth: query-string tokens leak through logs/Referer."""
     url = core_server["url"]
     async with aiohttp.ClientSession() as s:
-        async with s.get(f"{url}/v0/admin/state",
+        async with s.get(f"{url}/v0/admin/metrics",
                           params={"admin_token": ADMIN_TOKEN}) as r:
             assert r.status == 401
 
@@ -226,7 +188,7 @@ async def test_admin_rate_limit_returns_429(monkeypatch, tmp_path):
         async with aiohttp.ClientSession() as session:
             statuses = []
             for _ in range(8):
-                async with session.get(f"{url}/v0/admin/state", headers=HEADERS) as r:
+                async with session.get(f"{url}/v0/admin/metrics", headers=HEADERS) as r:
                     statuses.append(r.status)
         assert 429 in statuses, f"expected 429 in {statuses}"
         assert statuses.index(429) <= 5  # burst=3 plus a few refills
@@ -239,15 +201,9 @@ async def test_node_queue_is_bounded(core_server):
     import asyncio as _asyncio
     from core.core import NODE_QUEUE_MAX
 
-    state = core_server["state"]
-    # Register a fake target node by hand: take an unread queue and stuff it
-    # full, then route a real invocation against it. Direct queue probe — no
-    # SDK plumbing — keeps the test independent of node_sdk timing.
     target_queue = _asyncio.Queue(maxsize=NODE_QUEUE_MAX)
     while not target_queue.full():
         target_queue.put_nowait({"type": "deliver", "data": {}})
     assert target_queue.qsize() == NODE_QUEUE_MAX
     with pytest.raises(_asyncio.QueueFull):
         target_queue.put_nowait({"type": "deliver", "data": {}})
-
-

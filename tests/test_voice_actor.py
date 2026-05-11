@@ -123,19 +123,17 @@ async def test_node_registers_with_all_surfaces(voice_actor_node):
                      "session_status", "ui_visibility"}
 
 
-async def test_admin_state_exposes_voice_schemas(voice_core, voice_actor_node):
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"{voice_core['url']}/v0/admin/state",
-                         headers={"X-Admin-Token": os.environ["ADMIN_TOKEN"]}) as r:
-            assert r.status == 200
-            full = await r.json()
+async def test_core_state_exposes_voice_schemas(voice_core, voice_actor_node):
+    """voice_actor invokes core.state and reads back its own surface schemas."""
+    node = voice_actor_node["node"]
+    result = await node.invoke("core.state", {})
+    assert result["kind"] == "response", result
+    full = result["payload"]
     voice = next(n for n in full["nodes"] if n["id"] == "voice_actor")
     surfaces = {s["name"]: s for s in voice["surfaces"]}
-    # All five surfaces present, each has a non-empty schema.
     for name in ("start_session", "stop_session", "say", "session_status", "ui_visibility"):
         assert name in surfaces, f"missing surface {name}"
         assert surfaces[name].get("schema"), f"{name} has no schema"
-    # start_session schema accepts an optional voice + system_prompt.
     assert "voice" in surfaces["start_session"]["schema"]["properties"]
     assert "text" in surfaces["say"]["schema"]["properties"]
 
