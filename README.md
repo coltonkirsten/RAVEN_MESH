@@ -31,6 +31,14 @@ Example meshes, reference node implementations (cron, webui, human, approval, ka
 
 That's where to look for "how do I plug a real node in" or "show me a working demo". Pin it to a specific revision of this protocol repo and it builds on top of the surfaces defined here.
 
+## Experiments archive
+
+Earlier exploration work — alternate-language ports (Elixir, Go, Rust), a NATS-pivot evaluation, a multi-host federation prototype, a causal-chain time-travel debugger, a runtime tool-discovery composer, and the daemon-vs-cold-spawn process-model benchmark — has been moved out to a companion archive repo:
+
+**https://github.com/R-A-V-E-N-delegate/raven-mesh-experiments**
+
+Each subdirectory has its own analysis document recording what was tried and what it concluded. This is a graveyard, not a roadmap — the prototypes are frozen in time and not guaranteed to run today.
+
 ## Quick start
 
 ```bash
