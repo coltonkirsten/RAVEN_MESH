@@ -42,7 +42,8 @@ async def _payload(operator: MeshNode, surface: str, payload: dict | None = None
 
 async def test_core_state(operator, core_server):
     body = await _payload(operator, "state")
-    assert body["manifest_path"].endswith("demo.yaml")
+    # manifest_path is the ephemeral test manifest constructed by the fixture.
+    assert body["manifest_path"] == str(core_server["manifest_path"])
     node_ids = {n["id"] for n in body["nodes"]}
     assert "core" in node_ids
     assert {"voice_actor", "tasks", "human_approval"} <= node_ids
@@ -211,15 +212,7 @@ async def test_manifest_reload_closes_removed_node_session(operator, core_server
         assert "tasks" not in state.connections
     finally:
         await tasks.stop()
-        # Restore original manifest so other tests aren't poisoned by tmp state.
-        original = (pathlib.Path(state.manifest_path).parent.parent
-                    / "manifests" / "demo.yaml")
-        # The fixture's manifest_path IS demo.yaml; the .bak holds the prior text.
-        bak = pathlib.Path(state.manifest_path).with_suffix(
-            pathlib.Path(state.manifest_path).suffix + ".bak"
-        )
-        if bak.exists():
-            pathlib.Path(state.manifest_path).write_text(bak.read_text())
+        # tmp_path is unique per test — no cross-test poisoning to undo.
 
 
 async def test_replay_protection_emits_denied_replay(operator, core_server):
