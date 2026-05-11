@@ -1505,6 +1505,13 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(dump_config_toml(config))
         return 0
 
+    if not config.server.manifest_path:
+        sys.stderr.write(
+            "error: no manifest specified. Pass --manifest <path>, set "
+            "MESH_MANIFEST, or define server.manifest_path in mesh.toml.\n"
+        )
+        return 2
+
     try:
         asyncio.run(amain(config))
     except KeyboardInterrupt:

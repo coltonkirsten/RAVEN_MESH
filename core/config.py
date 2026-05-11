@@ -34,7 +34,7 @@ REPLAY_WINDOW_DEFAULT_S = 60
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8000
-    manifest_path: str = "manifests/demo.yaml"
+    manifest_path: Optional[str] = None
     invoke_timeout_s: int = 30
 
 
@@ -265,6 +265,8 @@ def load_config(
 
 
 def _format_toml_value(value: Any) -> str:
+    if value is None:
+        return '""'
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):

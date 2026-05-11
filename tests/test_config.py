@@ -46,7 +46,7 @@ def test_no_toml_no_env_returns_defaults():
     cfg = load_config(toml_path=None, env={})
     assert cfg.server.host == "127.0.0.1"
     assert cfg.server.port == 8000
-    assert cfg.server.manifest_path == "manifests/demo.yaml"
+    assert cfg.server.manifest_path is None
     assert cfg.server.invoke_timeout_s == 30
     assert cfg.admin.rate_limit == 60.0
     assert cfg.admin.rate_burst == 20.0
@@ -216,7 +216,7 @@ def test_dump_config_includes_source_attribution(tmp_path):
     assert "[server]" in out
     assert "host = \"10.0.0.1\"  # from env MESH_HOST" in out
     assert "port = 9001  # from " + path in out
-    assert "manifest_path = \"manifests/demo.yaml\"  # from defaults" in out
+    assert "manifest_path = \"\"  # from defaults" in out
     assert "audit_log_path = \"/tmp/x.log\"  # from CLI --audit-log" in out
 
 
