@@ -141,8 +141,18 @@ data: <envelope JSON>
 : heartbeat
 ```
 
-`:` lines are SSE comments and may be ignored. v0 nodes re-register on
-reconnect.
+`:` lines are SSE comments and may be ignored.
+
+Last-Event-ID resume is not supported. The `id:` SSE line MAY be absent
+on Core-emitted events. Nodes that disconnect re-register on reconnect;
+the register response carries current state. Events missed during a
+disconnect are not recovered.
+
+Invocations to a disconnected node fail synchronously with `503
+denied_node_unreachable`. They are not queued for delivery on the
+target's reconnect. RAVEN Mesh is a stream-delivery system, not a
+message queue. Callers that need durability ship it at the application
+layer (retry, idempotency keys, an explicit queue node).
 
 ### 4.5 Out-of-band endpoints (operator tooling)
 
