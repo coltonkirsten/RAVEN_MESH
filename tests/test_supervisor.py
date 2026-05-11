@@ -656,3 +656,57 @@ async def test_shutdown_all_kills_children(tmp_logs):
     for p in (pid_a, pid_b):
         with pytest.raises(ProcessLookupError):
             os.kill(p, 0)
+
+
+# ---------------------------------------------------------------------------
+# Default runner resolver — manifest-driven command resolution.
+# ---------------------------------------------------------------------------
+
+
+def test_default_resolver_reads_metadata_runner_cmd_string(tmp_path, tmp_logs):
+    """metadata.runner.cmd as a string is wrapped in /bin/sh -c."""
+    from core.supervisor import make_script_resolver
+    resolve = make_script_resolver(str(tmp_path), tmp_logs)
+    spec = resolve("alpha", {"metadata": {"runner": {"cmd": "echo hi"}}})
+    assert spec is not None
+    assert spec.cmd == ["/bin/sh", "-c", "echo hi"]
+    assert spec.env["MESH_NODE_ID"] == "alpha"
+
+
+def test_default_resolver_reads_metadata_runner_cmd_list(tmp_path, tmp_logs):
+    """metadata.runner.cmd as a list is passed through verbatim."""
+    from core.supervisor import make_script_resolver
+    resolve = make_script_resolver(str(tmp_path), tmp_logs)
+    spec = resolve("beta", {"metadata": {"runner": {"cmd": ["/usr/bin/env", "true"]}}})
+    assert spec is not None
+    assert spec.cmd == ["/usr/bin/env", "true"]
+
+
+def test_default_resolver_no_scripts_dir_no_cmd_returns_none(tmp_path, tmp_logs):
+    """With no scripts/ dir and no metadata.runner.cmd, the resolver returns None.
+
+    This is the post-strip default: nothing is implied by the filesystem.
+    """
+    from core.supervisor import make_script_resolver
+    # tmp_path is a fresh dir with no scripts/ subdir.
+    assert not (tmp_path / "scripts").exists()
+    resolve = make_script_resolver(str(tmp_path), tmp_logs)
+    assert resolve("gamma", {}) is None
+    assert resolve("gamma", {"metadata": {}}) is None
+
+
+def test_default_resolver_falls_back_to_scripts_dir_when_present(tmp_path, tmp_logs):
+    """Legacy fallback: if scripts/ exists, scripts/run_<id>.sh is honoured."""
+    from core.supervisor import make_script_resolver
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    script = scripts / "run_delta.sh"
+    script.write_text("#!/bin/bash\necho ok\n")
+    script.chmod(0o755)
+
+    resolve = make_script_resolver(str(tmp_path), tmp_logs)
+    spec = resolve("delta", {})
+    assert spec is not None
+    assert spec.cmd == ["/bin/bash", str(script)]
+    # Missing script in an existing scripts/ dir still returns None.
+    assert resolve("missing", {}) is None

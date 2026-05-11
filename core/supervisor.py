@@ -700,32 +700,44 @@ class Supervisor:
             await self._start_locked(spec)
 
 
-# ---------- default runner resolver: scripts/run_<node_id>.sh ----------
+# ---------- default runner resolver ----------
 
 def make_script_resolver(repo_root: str, log_dir: str) -> RunnerResolver:
-    """Resolver that finds scripts/run_<node_id>.sh in repo_root.
+    """Default resolver: read the per-node command from the manifest.
 
-    Returns None for nodes without a script (e.g. dummy actors that are
-    one-shot envelope senders, not long-running).
+    Resolution order:
+
+    1. ``metadata.runner.cmd`` on the manifest node — the canonical way to
+       declare a per-node command. ``cmd`` may be a string (run through
+       ``/bin/sh -c``) or a list (exec'd directly).
+    2. Legacy fallback: ``scripts/run_<node_id>.sh`` under ``repo_root``,
+       used only if a ``scripts/`` directory exists at the repo root.
+       This branch is a compatibility shim for the original reference
+       layout and is deprecated — new manifests should set
+       ``metadata.runner.cmd``.
+
+    Returns ``None`` when neither path resolves (e.g. dummy actors that
+    are one-shot envelope senders, not long-running).
     """
     root = pathlib.Path(repo_root).resolve()
     logs = pathlib.Path(log_dir).resolve()
+    scripts_dir = root / "scripts"
 
     def resolve(node_id: str, manifest_node: dict) -> Optional[ChildSpec]:
-        # Allow manifest to override per-node command via metadata.runner.cmd
         meta = manifest_node.get("metadata", {}) if manifest_node else {}
         runner_meta = meta.get("runner", {}) if isinstance(meta, dict) else {}
         if "cmd" in runner_meta:
             cmd = runner_meta["cmd"]
             if isinstance(cmd, str):
                 cmd = ["/bin/sh", "-c", cmd]
-        else:
-            script = root / "scripts" / f"run_{node_id}.sh"
+        elif scripts_dir.is_dir():
+            script = scripts_dir / f"run_{node_id}.sh"
             if not script.exists():
                 return None
             cmd = ["/bin/bash", str(script)]
+        else:
+            return None
         env = dict(runner_meta.get("env", {}) or {})
-        # Pass MESH_NODE_ID for any script that wants to introspect.
         env["MESH_NODE_ID"] = node_id
         return ChildSpec(
             node_id=node_id,
