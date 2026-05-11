@@ -214,22 +214,6 @@ def test_missing_top_level_nodes(tmp_path):
     assert any("nodes" in e and "required" in e for e in errors), errors
 
 
-def test_unknown_kind_rejected(tmp_path):
-    schema = _write_schema(tmp_path, "echo.json")
-    manifest = {
-        "nodes": [
-            {
-                "id": "alpha",
-                "kind": "wizard",  # not in enum
-                "runtime": "local-process",
-                "surfaces": [_surface("ping", schema)],
-            },
-        ],
-    }
-    errors, _ = validate_manifest(manifest, tmp_path, env={})
-    assert any("kind" in e for e in errors), errors
-
-
 def test_relationship_to_missing_dot(tmp_path):
     schema = _write_schema(tmp_path, "echo.json")
     manifest = {

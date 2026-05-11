@@ -96,11 +96,14 @@ Body: registration body (§3.2). Returns:
 {
   "session_id": "<uuid>",
   "node_id": "tasks",
-  "kind": "actor" | "capability" | "approval" | "hybrid",
+  "kind": "<echo of manifest kind, or null>",
   "surfaces": [{ "name": "create", "type": "tool", "invocation_mode": "request_response" }, ...],
   "relationships": [{ "from": "tasks", "to": "..." }, { "from": "...", "to": "tasks.create" }, ...]
 }
 ```
+
+`kind` is whatever string the manifest declared for the node (or `null`
+if absent). Core does not branch on it; see §8.
 
 ### 4.2 `POST /v0/invoke`
 
@@ -289,7 +292,6 @@ special-casing.
 ```yaml
 nodes:
   - id: <unique node id>          # must not be "core"
-    kind: actor | capability | approval | hybrid
     runtime: <opaque descriptor>   # e.g. local-process, docker:img, external-http, human
     identity_secret: env:<ENV_VAR> # or a literal string (discouraged outside dev)
     metadata: { ... free-form ... }
@@ -305,6 +307,13 @@ relationships:
 
 Schema paths are resolved relative to the manifest file. `metadata` is
 opaque to Core.
+
+The legacy `kind` field (`actor | capability | approval | hybrid`) is
+not part of the wire schema. Core does not branch on it, so the
+validator does not gate on it either. Manifests are free to carry a
+human-readable `kind` string (or any other tag) under `metadata`; Core
+will echo a top-level `kind` in `/v0/register` and `/v0/introspect` if
+the manifest declares one, but does not require or constrain it.
 
 Manifest validator rejects:
 - A node with `id: core`.

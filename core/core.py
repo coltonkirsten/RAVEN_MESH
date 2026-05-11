@@ -290,7 +290,7 @@ class CoreState:
                     "invocation_mode": s.get("invocation_mode", "request_response"),
                 }
             self.nodes_decl[node["id"]] = {
-                "kind": node["kind"],
+                "kind": node.get("kind"),
                 "runtime": node.get("runtime", "local-process"),
                 "metadata": node.get("metadata", {}),
                 "secret": secret,
