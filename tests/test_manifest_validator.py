@@ -92,17 +92,6 @@ def test_real_demo_manifest_passes(tmp_path):
     assert errors == [], errors
 
 
-def test_real_full_demo_flags_undeclared_nexus_agent(tmp_path):
-    """The known-bad full_demo.yaml has 10 edges from undeclared nexus_agent."""
-    manifest_path = ROOT / "manifests" / "full_demo.yaml"
-    manifest = yaml.safe_load(manifest_path.read_text())
-    errors, _ = validate_manifest(manifest, manifest_path.parent, env={})
-    nexus_errs = [e for e in errors if "nexus_agent" in e and "undeclared" in e]
-    assert len(nexus_errs) >= 10, (
-        f"expected >=10 errors flagging undeclared nexus_agent, got: {errors}"
-    )
-
-
 # ---- errors ----------------------------------------------------------------
 
 

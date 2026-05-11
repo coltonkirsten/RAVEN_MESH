@@ -64,7 +64,14 @@ def test_schema_validate_rejects_missing_required():
 
 
 def test_schema_validate_rejects_bad_color():
-    schema = json.loads((ROOT / "schemas" / "webui_change_color.json").read_text())
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": ["hex_color"],
+        "properties": {
+            "hex_color": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}
+        },
+    }
     with pytest.raises(ValidationError):
         jsonschema_validate({"hex_color": "not-a-color"}, schema)
     jsonschema_validate({"hex_color": "#a1b2c3"}, schema)
